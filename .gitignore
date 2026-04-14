@@ -1,0 +1,34 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Model checkpoints
+*.pt
+*.pth
+
+# Data (generated or downloaded)
+data/
+
+# Experiment tracking
+wandb/
+
+# Experiment plots (keep directory, ignore generated images)
+experiments/plots/*.png
+experiments/plots/*.pdf
+!experiments/plots/.gitkeep
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

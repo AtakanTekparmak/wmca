@@ -1,0 +1,247 @@
+WARNING: Unknown model 'rescor_e2'. Known: ['rescor', 'pure_nca', 'conv2d', 'mlp', 'cml_ridge', 'nca_inside_cml', 'gated_blend', 'cml_reg']
+WARNING: Unknown model 'rescor_e4'. Known: ['rescor', 'pure_nca', 'conv2d', 'mlp', 'cml_ridge', 'nca_inside_cml', 'gated_blend', 'cml_reg']
+Using CUDA Acceleration!
+========================================================================
+UNIFIED ABLATION
+========================================================================
+  Benchmarks : ['heat', 'gol', 'ks', 'gray_scott', 'rule110', 'wireworld', 'grid_world']
+  Models     : ['rescor', 'rescor_e2', 'rescor_e4']
+  Grid size  : 16
+  Epochs     : 30
+  Trajectories: 300
+  Seed       : 42
+  Device     : cuda
+  Quick mode : False
+
+
+========================================================================
+  [1/7] BENCHMARK: heat (16x16)
+========================================================================
+  Data generated in 1.5s
+    X_train: torch.Size([10500, 1, 16, 16]), Y_train: torch.Size([10500, 1, 16, 16])
+    X_test:  torch.Size([2250, 1, 16, 16]),  Y_test:  torch.Size([2250, 1, 16, 16])
+    Meta: {'name': 'heat', 'loss_type': 'mse', 'metric': 'mse', 'in_channels': 1, 'out_channels': 1, 'grid_size': 16, 'n_trajectories': 300, 'n_steps': 50, 'alpha_heat': 0.1, 'dt': 0.01, 'dx': 0.0625}
+
+  --- [1/3] rescor on heat ---
+    Training time: 24.7s
+    >> rescor: mse=0.000000  rollout:h10=0.000003  params(T/F):321/12  time:24.7s
+
+  --- [2/3] rescor_e2 on heat ---
+    Training time: 34.4s
+    >> rescor_e2: mse=0.000001  rollout:h10=0.000095  params(T/F):2849/12  time:34.4s
+
+  --- [3/3] rescor_e4 on heat ---
+    Training time: 128.8s
+    >> rescor_e4: mse=0.000001  rollout:h10=0.000081  params(T/F):2851/12  time:128.8s
+
+========================================================================
+  [2/7] BENCHMARK: gol (16x16)
+========================================================================
+  Data generated in 0.1s
+    X_train: torch.Size([4200, 1, 16, 16]), Y_train: torch.Size([4200, 1, 16, 16])
+    X_test:  torch.Size([900, 1, 16, 16]),  Y_test:  torch.Size([900, 1, 16, 16])
+    Meta: {'name': 'gol', 'loss_type': 'bce', 'metric': 'accuracy', 'in_channels': 1, 'out_channels': 1, 'grid_size': 16, 'n_trajectories': 300, 'n_steps': 20, 'density': 0.3}
+
+  --- [1/3] rescor on gol ---
+    Training time: 11.4s
+    >> rescor: accuracy=0.876519  rollout:h10=0.650000  params(T/F):321/12  time:11.4s
+
+  --- [2/3] rescor_e2 on gol ---
+    Training time: 13.4s
+    >> rescor_e2: accuracy=0.960486  rollout:h10=0.721875  params(T/F):2849/12  time:13.4s
+
+  --- [3/3] rescor_e4 on gol ---
+    Training time: 49.6s
+    >> rescor_e4: accuracy=0.960447  rollout:h10=0.733594  params(T/F):2851/12  time:49.6s
+
+========================================================================
+  [3/7] BENCHMARK: ks (16x16)
+========================================================================
+  Data generated in 16.5s
+    X_train: torch.Size([21000, 1, 1, 16]), Y_train: torch.Size([21000, 1, 1, 16])
+    X_test:  torch.Size([4500, 1, 1, 16]),  Y_test:  torch.Size([4500, 1, 1, 16])
+    Meta: {'name': 'ks', 'loss_type': 'mse', 'metric': 'mse', 'in_channels': 1, 'out_channels': 1, 'spatial_dims': '1d', 'grid_width': 16, 'n_trajectories': 300, 'n_steps': 100, 'L': 22.0, 'dt': 0.05, 'n_sub': 5, 'warmup_steps': 200, 'norm_min': -0.066805899143219, 'norm_max': 0.06745526939630508}
+
+  --- [1/3] rescor on ks ---
+    Training time: 45.9s
+    >> rescor: mse=0.000001  rollout:h10=0.000006  params(T/F):321/12  time:45.9s
+
+  --- [2/3] rescor_e2 on ks ---
+    Training time: 62.8s
+    >> rescor_e2: mse=0.000000  rollout:h10=0.000001  params(T/F):2849/12  time:62.8s
+
+  --- [3/3] rescor_e4 on ks ---
+    Training time: 241.5s
+    >> rescor_e4: mse=0.000000  rollout:h10=0.000003  params(T/F):2851/12  time:241.5s
+
+========================================================================
+  [4/7] BENCHMARK: gray_scott (16x16)
+========================================================================
+  Data generated in 6.8s
+    X_train: torch.Size([21000, 2, 16, 16]), Y_train: torch.Size([21000, 2, 16, 16])
+    X_test:  torch.Size([4500, 2, 16, 16]),  Y_test:  torch.Size([4500, 2, 16, 16])
+    Meta: {'name': 'gray_scott', 'loss_type': 'mse', 'metric': 'mse', 'in_channels': 2, 'out_channels': 2, 'grid_size': 16, 'n_trajectories': 300, 'n_steps': 100, 'd_u': 0.16, 'd_v': 0.08, 'f_feed': 0.035, 'k_kill': 0.065, 'dt': 1.0, 'dx': 1.0, 'n_substeps': 4, 'norm_stats': {'u': {'min': 0.23016880452632904, 'max': 1.0, 'range': 0.769831195473671}, 'v': {'min': 0.0, 'max': 0.4650138318538666, 'range': 0.4650138318538666}}}
+
+  --- [1/3] rescor on gray_scott ---
+    Training time: 46.3s
+    >> rescor: mse=0.000003  rollout:h10=0.000307  params(T/F):626/21  time:46.3s
+
+  --- [2/3] rescor_e2 on gray_scott ---
+    Training time: 54.3s
+    >> rescor_e2: mse=0.000001  rollout:h10=0.000043  params(T/F):4610/21  time:54.3s
+
+  --- [3/3] rescor_e4 on gray_scott ---
+    Training time: 232.6s
+    >> rescor_e4: mse=0.000001  rollout:h10=0.000045  params(T/F):4614/21  time:232.6s
+
+========================================================================
+  [5/7] BENCHMARK: rule110 (16x16)
+========================================================================
+  Data generated in 0.1s
+    X_train: torch.Size([6300, 1, 1, 16]), Y_train: torch.Size([6300, 1, 1, 16])
+    X_test:  torch.Size([1350, 1, 1, 16]),  Y_test:  torch.Size([1350, 1, 1, 16])
+    Meta: {'name': 'rule110', 'loss_type': 'bce', 'metric': 'accuracy', 'in_channels': 1, 'out_channels': 1, 'spatial_dims': '1d', 'grid_width': 16, 'n_trajectories': 300, 'n_steps': 30, 'density': 0.5}
+
+  --- [1/3] rescor on rule110 ---
+    Training time: 11.5s
+    >> rescor: accuracy=0.968287  rollout:h10=0.743750  params(T/F):321/12  time:11.5s
+
+  --- [2/3] rescor_e2 on rule110 ---
+    Training time: 13.2s
+    >> rescor_e2: accuracy=0.968287  rollout:h10=0.743750  params(T/F):2849/12  time:13.2s
+
+  --- [3/3] rescor_e4 on rule110 ---
+    Training time: 73.8s
+    >> rescor_e4: accuracy=0.968287  rollout:h10=0.743750  params(T/F):2851/12  time:73.8s
+
+========================================================================
+  [6/7] BENCHMARK: wireworld (16x16)
+========================================================================
+  Data generated in 1.4s
+    X_train: torch.Size([4200, 4, 16, 16]), Y_train: torch.Size([4200, 4, 16, 16])
+    X_test:  torch.Size([900, 4, 16, 16]),  Y_test:  torch.Size([900, 4, 16, 16])
+    Meta: {'name': 'wireworld', 'loss_type': 'cross_entropy', 'metric': 'accuracy', 'in_channels': 4, 'out_channels': 4, 'grid_size': 16, 'n_trajectories': 300, 'n_steps': 20, 'conductor_density': 0.3, 'n_heads': 2}
+
+  --- [1/3] rescor on wireworld ---
+    Training time: 8.3s
+    >> rescor: accuracy=0.998845  rollout:h10=0.993164  params(T/F):1236/39  time:8.3s
+
+  --- [2/3] rescor_e2 on wireworld ---
+    Training time: 10.1s
+    >> rescor_e2: accuracy=0.978811  rollout:h10=0.988184  params(T/F):8132/39  time:10.1s
+
+  --- [3/3] rescor_e4 on wireworld ---
+    Training time: 47.0s
+    >> rescor_e4: accuracy=0.704514  rollout:h10=0.867969  params(T/F):8140/39  time:47.0s
+
+========================================================================
+  [7/7] BENCHMARK: grid_world (16x16)
+========================================================================
+  Data generated in 0.1s
+    X_train: torch.Size([2100, 8, 16, 16]), Y_train: torch.Size([2100, 4, 16, 16])
+    X_test:  torch.Size([450, 8, 16, 16]),  Y_test:  torch.Size([450, 4, 16, 16])
+    Meta: {'name': 'grid_world', 'loss_type': 'cross_entropy', 'metric': 'accuracy', 'in_channels': 8, 'out_channels': 4, 'grid_size': 16, 'n_transitions': 3000, 'n_actions': 4, 'n_cell_types': 4, 'wall_density': 0.2, 'env_class': <class 'wmca.benchmarks.GridWorldEnv'>, 'action_conditioned': True}
+
+  --- [1/3] rescor on grid_world ---
+    Training time: 4.0s
+    [SKIP] Rollout: Input channels 8 != output channels 4 (action-conditioned; rollout not applicable)
+    CEM planning: success=35.0%  avg_steps=30.5  time=368.9s
+    >> rescor: accuracy=0.999245  rollout:skipped(action-cond)  params(T/F):1812/39  time:4.0s
+
+  --- [2/3] rescor_e2 on grid_world ---
+    Training time: 5.7s
+    [SKIP] Rollout: Input channels 8 != output channels 4 (action-conditioned; rollout not applicable)
+    CEM planning: success=25.0%  avg_steps=17.8  time=386.2s
+    >> rescor_e2: accuracy=0.999167  rollout:skipped(action-cond)  params(T/F):9284/39  time:5.7s
+
+  --- [3/3] rescor_e4 on grid_world ---
+    Training time: 22.9s
+    [SKIP] Rollout: Input channels 8 != output channels 4 (action-conditioned; rollout not applicable)
+    CEM planning: success=16.0%  avg_steps=21.8  time=438.5s
+    >> rescor_e4: accuracy=0.999219  rollout:skipped(action-cond)  params(T/F):9292/39  time:22.9s
+
+Total wall time: 2366.3s
+
+================================================================================
+UNIFIED ABLATION RESULTS
+================================================================================
+
+Benchmark: heat (16x16)
+------------------------------------------------------------------------------
+Model                  1-step MSE       h=10 MSE      Params(T/F)      Time
+---------------------------------------------------------------------------
+rescor                   0.000000       0.000003           321/12     24.7s
+rescor_e2                0.000001       0.000095          2849/12     34.4s
+rescor_e4                0.000001       0.000081          2851/12    128.8s
+
+Benchmark: gol (16x16)
+------------------------------------------------------------------------------
+Model                  1-step Acc       h=10 Acc      Params(T/F)      Time
+---------------------------------------------------------------------------
+rescor                   0.876519       0.650000           321/12     11.4s
+rescor_e2                0.960486       0.721875          2849/12     13.4s
+rescor_e4                0.960447       0.733594          2851/12     49.6s
+
+Benchmark: ks (16x16)
+------------------------------------------------------------------------------
+Model                  1-step MSE       h=10 MSE      Params(T/F)      Time
+---------------------------------------------------------------------------
+rescor                   0.000001       0.000006           321/12     45.9s
+rescor_e2                0.000000       0.000001          2849/12     62.8s
+rescor_e4                0.000000       0.000003          2851/12    241.5s
+
+Benchmark: gray_scott (16x16)
+------------------------------------------------------------------------------
+Model                  1-step MSE       h=10 MSE      Params(T/F)      Time
+---------------------------------------------------------------------------
+rescor                   0.000003       0.000307           626/21     46.3s
+rescor_e2                0.000001       0.000043          4610/21     54.3s
+rescor_e4                0.000001       0.000045          4614/21    232.6s
+
+Benchmark: rule110 (16x16)
+------------------------------------------------------------------------------
+Model                  1-step Acc       h=10 Acc      Params(T/F)      Time
+---------------------------------------------------------------------------
+rescor                   0.968287       0.743750           321/12     11.5s
+rescor_e2                0.968287       0.743750          2849/12     13.2s
+rescor_e4                0.968287       0.743750          2851/12     73.8s
+
+Benchmark: wireworld (16x16)
+------------------------------------------------------------------------------
+Model                  1-step Acc       h=10 Acc      Params(T/F)      Time
+---------------------------------------------------------------------------
+rescor                   0.998845       0.993164          1236/39      8.3s
+rescor_e2                0.978811       0.988184          8132/39     10.1s
+rescor_e4                0.704514       0.867969          8140/39     47.0s
+
+Benchmark: grid_world (16x16)
+------------------------------------------------------------------------------
+Model                  1-step Acc      Params(T/F)      Time
+------------------------------------------------------------
+rescor                   0.999245          1812/39      4.0s
+rescor_e2                0.999167          9284/39      5.7s
+rescor_e4                0.999219          9292/39     22.9s
+
+  CEM Planning (grid_world):
+  Model                Success%   AvgSteps
+  ----------------------------------------
+  rescor                  35.0%       30.5
+  rescor_e2               25.0%       17.8
+  rescor_e4               16.0%       21.8
+
+==============================================================================
+CROSS-BENCHMARK RANKING
+==============================================================================
+Model                Avg Rank   Best On                  Worst On                
+------------------------------------------------------------------------------
+rescor_e2                 1.7   gol,ks,gray_scott        grid_world              
+rescor                    1.9   heat,rule110,wireworld,grid_world gol,ks,gray_scott       
+rescor_e4                 2.4   -                        heat,rule110,wireworld  
+
+Results saved to /root/wmca/experiments/results/unified_ablation.json
+
+Generating plots...
+  Saved plot: /root/wmca/experiments/plots/unified_pareto.png
+  Saved plot: /root/wmca/experiments/plots/unified_heatmap.png
+
+Done.

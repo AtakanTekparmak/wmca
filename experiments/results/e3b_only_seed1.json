@@ -1,0 +1,186 @@
+{
+  "config": {
+    "benchmarks": [
+      "heat",
+      "gol",
+      "ks",
+      "gray_scott",
+      "rule110",
+      "wireworld",
+      "grid_world"
+    ],
+    "models": [
+      "rescor_e3b"
+    ],
+    "grid_size": 16,
+    "epochs": 30,
+    "trajectories": 300,
+    "seed": 1,
+    "quick": false,
+    "no_wandb": true
+  },
+  "results": {
+    "heat": {
+      "rescor_e3b": {
+        "one_step": {
+          "mse": 1.5376186448621512e-06
+        },
+        "rollout": {
+          "1": 9.443227099836804e-06,
+          "3": 9.18064597499324e-06,
+          "5": 8.60405998537317e-06,
+          "10": 9.319303899246734e-06
+        },
+        "params": {
+          "trained": 4641,
+          "frozen": 12
+        },
+        "train_time": 34.01388096809387
+      }
+    },
+    "gol": {
+      "rescor_e3b": {
+        "one_step": {
+          "accuracy": 0.9583767361111111,
+          "bce": 0.2194114358557595
+        },
+        "rollout": {
+          "1": 0.9375,
+          "3": 0.8671875,
+          "5": 0.81796875,
+          "10": 0.777734375
+        },
+        "params": {
+          "trained": 4641,
+          "frozen": 12
+        },
+        "train_time": 13.251431941986084
+      }
+    },
+    "ks": {
+      "rescor_e3b": {
+        "one_step": {
+          "mse": 8.23814486655768e-07
+        },
+        "rollout": {
+          "1": 2.193990766841125e-08,
+          "3": 1.0368842140451306e-07,
+          "5": 2.519077497709077e-07,
+          "10": 9.632636874812306e-07
+        },
+        "params": {
+          "trained": 4641,
+          "frozen": 12
+        },
+        "train_time": 62.37907528877258
+      }
+    },
+    "gray_scott": {
+      "rescor_e3b": {
+        "one_step": {
+          "mse": 1.588009636179777e-06
+        },
+        "rollout": {
+          "1": 6.3542393036186695e-06,
+          "3": 1.7195148757309653e-05,
+          "5": 2.4372955522267148e-05,
+          "10": 3.5933611798100173e-05
+        },
+        "params": {
+          "trained": 8130,
+          "frozen": 21
+        },
+        "train_time": 61.72603440284729
+      }
+    },
+    "rule110": {
+      "rescor_e3b": {
+        "one_step": {
+          "accuracy": 0.9692592592592593,
+          "bce": 0.04930358415952435
+        },
+        "rollout": {
+          "1": 1.0,
+          "3": 0.9583333333333334,
+          "5": 0.9,
+          "10": 0.79375
+        },
+        "params": {
+          "trained": 4641,
+          "frozen": 12
+        },
+        "train_time": 19.224587202072144
+      }
+    },
+    "wireworld": {
+      "rescor_e3b": {
+        "one_step": {
+          "accuracy": 0.9729904513888888,
+          "ce": 0.7614961128764682
+        },
+        "rollout": {
+          "1": 0.990234375,
+          "3": 0.9788411458333334,
+          "5": 0.9740234375,
+          "10": 0.97783203125
+        },
+        "params": {
+          "trained": 15108,
+          "frozen": 39
+        },
+        "train_time": 13.133936882019043
+      }
+    },
+    "grid_world": {
+      "rescor_e3b": {
+        "one_step": {
+          "accuracy": 0.9994184027777778,
+          "ce": 0.0017437128712319665
+        },
+        "rollout": {
+          "action_conditioned": true,
+          "skipped_reason": "Input channels 8 != output channels 4 (action-conditioned; rollout not applicable)"
+        },
+        "params": {
+          "trained": 17412,
+          "frozen": 39
+        },
+        "train_time": 6.343525409698486,
+        "cem_planning": {
+          "success_rate": 0.14,
+          "avg_steps": 29.0,
+          "avg_reward": 0.14
+        }
+      }
+    }
+  },
+  "cross_benchmark_scores": {
+    "rescor_e3b": {
+      "norm_score": 1.0,
+      "raw_score": 0.9857201285856906,
+      "param_eff_score": 0.26024591110102946,
+      "pareto_score": 1.0,
+      "avg_rank": 1.0,
+      "best_on": [
+        "heat",
+        "gol",
+        "ks",
+        "gray_scott",
+        "rule110",
+        "wireworld",
+        "grid_world"
+      ],
+      "worst_on": [
+        "heat",
+        "gol",
+        "ks",
+        "gray_scott",
+        "rule110",
+        "wireworld",
+        "grid_world"
+      ],
+      "n_benchmarks": 7
+    }
+  },
+  "timestamp": "2026-04-12T00:27:04"
+}

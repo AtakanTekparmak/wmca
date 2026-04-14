@@ -1,0 +1,325 @@
+{
+  "config": {
+    "benchmarks": [
+      "heat",
+      "gol",
+      "ks",
+      "gray_scott",
+      "rule110",
+      "wireworld",
+      "crafter_lite",
+      "minigrid",
+      "autumn_disease",
+      "autumn_gravity",
+      "autumn_water",
+      "atari_pong",
+      "atari_breakout",
+      "dmcontrol"
+    ],
+    "models": [
+      "mlp"
+    ],
+    "grid_size": 16,
+    "epochs": 30,
+    "trajectories": 300,
+    "seed": 43,
+    "quick": false,
+    "no_wandb": true
+  },
+  "results": {
+    "heat": {
+      "mlp": {
+        "one_step": {
+          "mse": 8.827309885398588e-05
+        },
+        "rollout": {
+          "1": 0.0003226951521355659,
+          "3": 0.00038332430995069444,
+          "5": 0.000439759052824229,
+          "10": 0.00047909002751111984
+        },
+        "params": {
+          "trained": 197376,
+          "frozen": 0
+        },
+        "train_time": 12.51605486869812
+      }
+    },
+    "gol": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 0.7509895833333333,
+          "bce": 0.4540582995944553
+        },
+        "rollout": {
+          "1": 0.609375,
+          "3": 0.6627604166666666,
+          "5": 0.6796875,
+          "10": 0.69296875
+        },
+        "params": {
+          "trained": 197376,
+          "frozen": 0
+        },
+        "train_time": 4.739169120788574
+      }
+    },
+    "ks": {
+      "mlp": {
+        "one_step": {
+          "mse": 6.736873765678158e-06
+        },
+        "rollout": {
+          "1": 1.5306960676753079e-06,
+          "3": 5.814002633997006e-06,
+          "5": 1.2230496395204682e-05,
+          "10": 3.7531372072407976e-05
+        },
+        "params": {
+          "trained": 74256,
+          "frozen": 0
+        },
+        "train_time": 34.54981803894043
+      }
+    },
+    "gray_scott": {
+      "mlp": {
+        "one_step": {
+          "mse": 1.1151324539645834e-05
+        },
+        "rollout": {
+          "1": 1.3036949894740246e-05,
+          "3": 1.1558930964383762e-05,
+          "5": 1.2738903933495749e-05,
+          "10": 2.5936440579243936e-05
+        },
+        "params": {
+          "trained": 328704,
+          "frozen": 0
+        },
+        "train_time": 29.47037696838379
+      }
+    },
+    "rule110": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 1.0,
+          "bce": 0.00028185902072841093
+        },
+        "rollout": {
+          "1": 1.0,
+          "3": 1.0,
+          "5": 1.0,
+          "10": 1.0
+        },
+        "params": {
+          "trained": 74256,
+          "frozen": 0
+        },
+        "train_time": 8.409466743469238
+      }
+    },
+    "wireworld": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 0.6966145833333334,
+          "ce": 0.9813832132021586
+        },
+        "rollout": {
+          "1": 0.853515625,
+          "3": 0.8515625,
+          "5": 0.85078125,
+          "10": 0.85087890625
+        },
+        "params": {
+          "trained": 591360,
+          "frozen": 0
+        },
+        "train_time": 8.872743844985962
+      }
+    },
+    "crafter_lite": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 0.6669357638888889,
+          "ce": 0.946848848660787
+        },
+        "rollout": {
+          "action_conditioned": true,
+          "skipped_reason": "Input channels 8 != output channels 7 (action-conditioned; rollout not applicable)"
+        },
+        "params": {
+          "trained": 1050880,
+          "frozen": 0
+        },
+        "train_time": 11.824312210083008
+      }
+    },
+    "minigrid": {
+      "mlp": {
+        "one_step": {
+          "mse": 0.003752211680014928
+        },
+        "rollout": {
+          "action_conditioned": true,
+          "skipped_reason": "Input channels 8 != output channels 4 (action-conditioned; rollout not applicable)"
+        },
+        "params": {
+          "trained": 853504,
+          "frozen": 0
+        },
+        "train_time": 4.620002031326294
+      }
+    },
+    "autumn_disease": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 0.6379542824074074,
+          "ce": 1.1743433858730175
+        },
+        "rollout": {
+          "1": 0.9484375,
+          "3": 0.9455729166666667,
+          "5": 0.93625,
+          "10": 0.903515625
+        },
+        "params": {
+          "trained": 722688,
+          "frozen": 0
+        },
+        "train_time": 16.187241077423096
+      }
+    },
+    "autumn_gravity": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 0.92265625,
+          "ce": 0.821011996269226
+        },
+        "rollout": {
+          "1": 0.9609375,
+          "3": 0.9609375,
+          "5": 0.9609375,
+          "10": 0.9609375
+        },
+        "params": {
+          "trained": 591360,
+          "frozen": 0
+        },
+        "train_time": 8.53043508529663
+      }
+    },
+    "autumn_water": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 0.8663078703703704,
+          "ce": 0.8498221673788848
+        },
+        "rollout": {
+          "1": 0.9580078125,
+          "3": 0.9508463541666666,
+          "5": 0.94609375,
+          "10": 0.936328125
+        },
+        "params": {
+          "trained": 591360,
+          "frozen": 0
+        },
+        "train_time": 13.407933235168457
+      }
+    },
+    "atari_pong": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 1.0,
+          "ce": 5.395001993747428e-05
+        },
+        "rollout": {
+          "action_conditioned": true,
+          "skipped_reason": "Input channels 5 != output channels 4 (action-conditioned; rollout not applicable)"
+        },
+        "params": {
+          "trained": 1247744,
+          "frozen": 0
+        },
+        "train_time": 33.23593807220459
+      }
+    },
+    "atari_breakout": {
+      "mlp": {
+        "one_step": {
+          "accuracy": 1.0,
+          "ce": 4.016133794923209e-05
+        },
+        "rollout": {
+          "action_conditioned": true,
+          "skipped_reason": "Input channels 5 != output channels 4 (action-conditioned; rollout not applicable)"
+        },
+        "params": {
+          "trained": 804608,
+          "frozen": 0
+        },
+        "train_time": 25.225532054901123
+      }
+    },
+    "dmcontrol": {
+      "mlp": {
+        "one_step": {
+          "mse": 1.1224704418054899e-06
+        },
+        "rollout": {
+          "action_conditioned": true,
+          "skipped_reason": "Input channels 6 != output channels 5 (action-conditioned; rollout not applicable)"
+        },
+        "params": {
+          "trained": 68869,
+          "frozen": 0
+        },
+        "train_time": 56.596006870269775
+      }
+    }
+  },
+  "cross_benchmark_scores": {
+    "mlp": {
+      "norm_score": 1.0,
+      "raw_score": 0.8955437765936001,
+      "param_eff_score": 0.18105368701689278,
+      "pareto_score": 1.0,
+      "avg_rank": 1.0,
+      "best_on": [
+        "heat",
+        "gol",
+        "ks",
+        "gray_scott",
+        "rule110",
+        "wireworld",
+        "crafter_lite",
+        "minigrid",
+        "autumn_disease",
+        "autumn_gravity",
+        "autumn_water",
+        "atari_pong",
+        "atari_breakout",
+        "dmcontrol"
+      ],
+      "worst_on": [
+        "heat",
+        "gol",
+        "ks",
+        "gray_scott",
+        "rule110",
+        "wireworld",
+        "crafter_lite",
+        "minigrid",
+        "autumn_disease",
+        "autumn_gravity",
+        "autumn_water",
+        "atari_pong",
+        "atari_breakout",
+        "dmcontrol"
+      ],
+      "n_benchmarks": 14
+    }
+  },
+  "timestamp": "2026-04-14T17:25:38"
+}
