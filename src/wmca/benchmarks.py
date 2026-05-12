@@ -39,6 +39,43 @@ def _make_pairs(trajs: np.ndarray):
     return X, Y
 
 
+def _make_k_frame_pairs(trajs: np.ndarray, context_k: int = 4):
+    """(N, T+1, ...) -> X (N * (T+1-K), K, ...), Y (N * (T+1-K), ...).
+
+    Builds K-frame context windows. For trajectory i with frames f_0..f_T:
+      window j (0 <= j <= T - K + 1):
+        X[j] = [f_j, f_{j+1}, ..., f_{j+K-1}],
+        Y[j] = f_{j+K}
+
+    K=1 is equivalent to _make_pairs (single-frame input).
+    """
+    if context_k < 1:
+        raise ValueError(f"context_k must be >= 1, got {context_k}")
+    if context_k == 1:
+        # Return rank-4 X by design (bit-identical to _make_pairs) — caller
+        # should branch on context_k before reaching for this helper in the
+        # K=1 case. Provided here for completeness/safety.
+        X, Y = _make_pairs(trajs)
+        return X, Y
+    N, Tp1 = trajs.shape[:2]
+    rest = trajs.shape[2:]
+    K = context_k
+    n_windows = Tp1 - K
+    if n_windows <= 0:
+        raise ValueError(
+            f"Trajectory too short (T+1={Tp1}) for context_k={K}; "
+            f"need T+1 > K."
+        )
+    # Build (N, n_windows, K, *rest) windows, then flatten.
+    # Use stride-free stack to keep code readable; data sizes are small.
+    windows = np.stack(
+        [trajs[:, j:j + K] for j in range(n_windows)], axis=1
+    )  # (N, n_windows, K, *rest)
+    X = windows.reshape(-1, K, *rest)
+    Y = trajs[:, K:].reshape(-1, *rest)
+    return X, Y
+
+
 def _to_torch(arrays, device):
     """Convert a list of numpy arrays to torch tensors on device."""
     return tuple(torch.from_numpy(a).float().to(device) for a in arrays)
@@ -85,13 +122,15 @@ def _heat_random_ic(h: int, w: int, rng: np.random.RandomState) -> np.ndarray:
 
 def generate_heat(grid_size: int = 32, n_trajectories: int = 500,
                   n_steps: int = 50, seed: int = 42,
-                  device: str | torch.device = "cpu"):
+                  device: str | torch.device = "cpu",
+                  context_k: int = 1):
     """Heat equation benchmark.
 
     Returns (X_train, Y_train, X_val, Y_val, X_test, Y_test, meta).
-    X/Y shapes: (N, 1, H, W) float32 in [0, 1].
+    X/Y shapes (context_k=1, default):  X (N, 1, H, W), Y (N, 1, H, W).
+    X/Y shapes (context_k=K > 1):       X (N, K, 1, H, W), Y (N, 1, H, W).
     meta: dict with 'name', 'loss_type' ('mse'), 'metric' ('mse'),
-          'in_channels', 'out_channels'.
+          'in_channels', 'out_channels', 'context_k'.
     """
     device = torch.device(device)
     dx = 1.0 / grid_size
@@ -108,15 +147,19 @@ def generate_heat(grid_size: int = 32, n_trajectories: int = 500,
             u = _heat_step(u, coeff)
             trajs[i, t + 1] = u
 
-    train_t, val_t, test_t = _split_trajectories(trajs)
-    X_tr, Y_tr = _make_pairs(train_t)
-    X_v, Y_v = _make_pairs(val_t)
-    X_te, Y_te = _make_pairs(test_t)
+    # Add channel dim early: (N, T+1, H, W) -> (N, T+1, 1, H, W)
+    trajs = trajs[:, :, None, :, :]
 
-    # Add channel dim: (N, H, W) -> (N, 1, H, W)
-    X_tr = X_tr[:, None]; Y_tr = Y_tr[:, None]
-    X_v  = X_v[:, None];  Y_v  = Y_v[:, None]
-    X_te = X_te[:, None];  Y_te = Y_te[:, None]
+    train_t, val_t, test_t = _split_trajectories(trajs)
+
+    if context_k == 1:
+        X_tr, Y_tr = _make_pairs(train_t)
+        X_v, Y_v = _make_pairs(val_t)
+        X_te, Y_te = _make_pairs(test_t)
+    else:
+        X_tr, Y_tr = _make_k_frame_pairs(train_t, context_k=context_k)
+        X_v, Y_v = _make_k_frame_pairs(val_t, context_k=context_k)
+        X_te, Y_te = _make_k_frame_pairs(test_t, context_k=context_k)
 
     data = _to_torch([X_tr, Y_tr, X_v, Y_v, X_te, Y_te], device)
 
@@ -132,6 +175,7 @@ def generate_heat(grid_size: int = 32, n_trajectories: int = 500,
         "alpha_heat": _HEAT_ALPHA,
         "dt": _HEAT_DT,
         "dx": dx,
+        "context_k": context_k,
     }
     return BenchmarkData(*data, meta)
 
@@ -252,13 +296,15 @@ def _ks_random_ic(N: int, L: float,
 
 def generate_ks(grid_size: int = 64, n_trajectories: int = 200,
                 n_steps: int = 100, seed: int = 42,
-                device: str | torch.device = "cpu"):
+                device: str | torch.device = "cpu",
+                context_k: int = 1):
     """Kuramoto-Sivashinsky equation benchmark.
 
     ``grid_size`` is used as the 1D spatial width (N).
 
     Returns (X_train, Y_train, X_val, Y_val, X_test, Y_test, meta).
-    X/Y shapes: (N_samples, 1, 1, W) float32 in [0, 1] (globally normalized).
+    X/Y shapes (context_k=1): X (N_samples, 1, 1, W), Y (N_samples, 1, 1, W).
+    X/Y shapes (context_k=K): X (N_samples, K, 1, 1, W), Y (N_samples, 1, 1, W).
     """
     N = grid_size
     device = torch.device(device)
@@ -287,20 +333,19 @@ def generate_ks(grid_size: int = 64, n_trajectories: int = 200,
         normed = (raw - g_min) / (g_max - g_min + 1e-8)
         trajs[i, :, 0, :] = normed
 
+    # Add H=1 dim: (N, T+1, 1, W) -> (N, T+1, 1, 1, W)
+    trajs = trajs[:, :, :, None, :]
+
     train_t, val_t, test_t = _split_trajectories(trajs)
 
-    # Make pairs: shape (N_samples, 1, W) -> add H=1 -> (N_samples, 1, 1, W)
-    def _pairs_1d(tr):
-        X = tr[:, :-1].reshape(-1, 1, N)
-        Y = tr[:, 1:].reshape(-1, 1, N)
-        # Add H=1 dimension
-        X = X[:, :, None, :]  # (N_samples, 1, 1, W)
-        Y = Y[:, :, None, :]
-        return X, Y
-
-    X_tr, Y_tr = _pairs_1d(train_t)
-    X_v, Y_v = _pairs_1d(val_t)
-    X_te, Y_te = _pairs_1d(test_t)
+    if context_k == 1:
+        X_tr, Y_tr = _make_pairs(train_t)
+        X_v, Y_v = _make_pairs(val_t)
+        X_te, Y_te = _make_pairs(test_t)
+    else:
+        X_tr, Y_tr = _make_k_frame_pairs(train_t, context_k=context_k)
+        X_v, Y_v = _make_k_frame_pairs(val_t, context_k=context_k)
+        X_te, Y_te = _make_k_frame_pairs(test_t, context_k=context_k)
 
     data = _to_torch([X_tr, Y_tr, X_v, Y_v, X_te, Y_te], device)
 
@@ -320,6 +365,7 @@ def generate_ks(grid_size: int = 64, n_trajectories: int = 200,
         "warmup_steps": _KS_WARMUP,
         "norm_min": g_min,
         "norm_max": g_max,
+        "context_k": context_k,
     }
     return BenchmarkData(*data, meta)
 
@@ -377,11 +423,13 @@ def _gray_scott_step_torch(u: torch.Tensor, v: torch.Tensor,
 
 def generate_gray_scott(grid_size: int = 32, n_trajectories: int = 200,
                         n_steps: int = 100, seed: int = 42,
-                        device: str | torch.device = "cpu"):
+                        device: str | torch.device = "cpu",
+                        context_k: int = 1):
     """Gray-Scott reaction-diffusion benchmark.
 
     Returns (X_train, Y_train, X_val, Y_val, X_test, Y_test, meta).
-    X/Y shapes: (N, 2, H, W) float32 in [0, 1] (per-channel normalized).
+    X/Y shapes (context_k=1): X (N, 2, H, W), Y (N, 2, H, W).
+    X/Y shapes (context_k=K): X (N, K, 2, H, W), Y (N, 2, H, W).
     """
     device = torch.device(device)
     rng = np.random.RandomState(seed)
@@ -424,14 +472,14 @@ def generate_gray_scott(grid_size: int = 32, n_trajectories: int = 200,
 
     train_t, val_t, test_t = _split_trajectories(trajs)
 
-    def _pairs_2ch(tr):
-        X = tr[:, :-1].reshape(-1, 2, h, w)
-        Y = tr[:, 1:].reshape(-1, 2, h, w)
-        return X, Y
-
-    X_tr, Y_tr = _pairs_2ch(train_t)
-    X_v, Y_v = _pairs_2ch(val_t)
-    X_te, Y_te = _pairs_2ch(test_t)
+    if context_k == 1:
+        X_tr, Y_tr = _make_pairs(train_t)
+        X_v, Y_v = _make_pairs(val_t)
+        X_te, Y_te = _make_pairs(test_t)
+    else:
+        X_tr, Y_tr = _make_k_frame_pairs(train_t, context_k=context_k)
+        X_v, Y_v = _make_k_frame_pairs(val_t, context_k=context_k)
+        X_te, Y_te = _make_k_frame_pairs(test_t, context_k=context_k)
 
     data = _to_torch([X_tr, Y_tr, X_v, Y_v, X_te, Y_te], device)
 
@@ -452,6 +500,7 @@ def generate_gray_scott(grid_size: int = 32, n_trajectories: int = 200,
         "dx": _GS_DX,
         "n_substeps": _GS_N_SUBSTEPS,
         "norm_stats": norm_stats,
+        "context_k": context_k,
     }
     return BenchmarkData(*data, meta)
 

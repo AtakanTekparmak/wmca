@@ -12,7 +12,19 @@ import torch.nn.functional as F
 
 from wmca.modules.hybrid import (
     CML2D,
+    CML2DDiscreteSelect,
+    CML2DHybridMrEsn,
+    CML2DLearnedGateDynamic,
+    CML2DLearnedGateStatic,
+    CML2DMultiConfig,
+    CML2DMultiR,
+    CML2DRandomReservoir,
     CMLRegularizedNCA,
+    ResCorMamba,
+    ResCorMambaGated,
+    ResCorMambaStat,
+    ResCorRensDeep,
+    ResCorRensStatBank,
     DeepResCorGated,
     DeepResCorLite,
     GatedBlendWM,
@@ -30,6 +42,7 @@ from wmca.modules.hybrid import (
     ResidualCorrectionWMv9,
     TrajectoryAttentionWM,
 )
+from wmca.modules.discrete_rescor import DiscreteRescor, DiscreteRescorMamba
 
 
 # ===== Baseline Models ======================================================
@@ -154,6 +167,160 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "class": ResidualCorrectionWM,
         "description": "CML base + NCA correction",
     },
+    "rescor_gate_static": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + learned per-cell (eps, beta) from input (static gate)",
+        "extra_kwargs": {"cml_gate": "static"},
+    },
+    "rescor_gate_dynamic": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + learned per-cell (eps, beta) recomputed each CML step (dynamic gate)",
+        "extra_kwargs": {"cml_gate": "dynamic"},
+    },
+    "rescor_discrete_global": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + discrete selection over K=5 (eps, beta) configs (global softmax)",
+        "extra_kwargs": {"cml_gate": "discrete_global"},
+    },
+    "rescor_discrete_percell": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + discrete selection over K=5 (eps, beta) configs (per-cell softmax)",
+        "extra_kwargs": {"cml_gate": "discrete_percell"},
+    },
+    "rescor_multi_config": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + K=3 parallel CML passes with output blending (gradient-free CML selection)",
+        "extra_kwargs": {"cml_gate": "multi_config"},
+    },
+    "rescor_multi_config_percell": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + K=3 parallel CML passes with per-cell output blending",
+        "extra_kwargs": {"cml_gate": "multi_config_percell"},
+    },
+    "rescor_random_reservoir_preserved": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + K random-coupling frozen reservoirs (logistic preserved), softmax blend, no oracle",
+        "extra_kwargs": {"cml_gate": "random_reservoir_preserved"},
+    },
+    "rescor_random_reservoir_full": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + K random-coupling frozen reservoirs (ESN tanh, no logistic), softmax blend, no oracle",
+        "extra_kwargs": {"cml_gate": "random_reservoir_full"},
+    },
+    "rescor_esn": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + K frozen tanh reservoirs with random coupling kernels (Echo State Network template). Canonical name for A-full.",
+        "extra_kwargs": {"cml_gate": "random_reservoir_full"},
+    },
+    "rescor_random_reservoir_full_cond": {
+        "class": ResidualCorrectionWM,
+        "description": "ResCor + A-full with input-conditioned gate (hypernet on [mean, var, grad-norm])",
+        "extra_kwargs": {"cml_gate": "random_reservoir_full_cond"},
+    },
+    "rescor_esn_uniform": {
+        "class": ResidualCorrectionWM,
+        "description": "rescor_esn with strict 1/K averaging (zero trainable gate params)",
+        "extra_kwargs": {"cml_gate": "random_reservoir_full_uniform"},
+    },
+    "rescor_mr": {
+        "class": ResidualCorrectionWM,
+        "description": "K vanilla CMLs (logistic + shared coupling) with K different r in [3.57, 3.99]. Learned softmax gate.",
+        "extra_kwargs": {"cml_gate": "multi_r"},
+    },
+    "rescor_mr_uniform": {
+        "class": ResidualCorrectionWM,
+        "description": "rescor_mr with strict 1/K averaging (zero trainable gate params)",
+        "extra_kwargs": {"cml_gate": "multi_r_uniform"},
+    },
+    "rescor_hybrid": {
+        "class": ResidualCorrectionWM,
+        "description": "Hybrid bank: half vanilla-r CMLs (chaos-depth axis) + half random-coupling tanh reservoirs (random-spatial axis), uniform 1/K averaged. Zero gate params.",
+        "extra_kwargs": {"cml_gate": "hybrid_mr_esn"},
+    },
+    "rescor_rens": {
+        "class": ResidualCorrectionWM,
+        "description": "R-Ensemble: canonical name for rescor_mr_uniform (K vanilla CMLs spanning r in [3.57, 3.99], uniform 1/K averaging, zero gate params).",
+        "extra_kwargs": {"cml_gate": "multi_r_uniform"},
+    },
+    "rescor_rens_deep": {
+        "class": ResCorRensDeep,
+        "description": "Deep stack of L rescor_rens stages (each = K=32 r-ensemble + NCA correction with residual addition). L is configurable.",
+    },
+    "rescor_rens_stat_full": {
+        "class": ResCorRensStatBank,
+        "description": "rescor_rens + stat-bank NCA with variance. NCA sees [x, cml_mean, cml_var, cml_min, cml_max] across K=32 reservoirs.",
+        "extra_kwargs": {"include_var": True},
+    },
+    "rescor_mamba": {
+        "class": ResCorMamba,
+        "description": (
+            "rescor_rens K=32 spatial core + per-cell Mamba SSM over K_context=4 "
+            "past frames. Multi-frame input (B, 4, C, H, W). Mean-only NCA, "
+            "zero-init Mamba out_proj (starts as pure rens K=32). "
+            "Requires context_k=4 benchmark generation."
+        ),
+        "extra_kwargs": {
+            "cml_K": 32, "context_k": 4, "expand": 2, "zero_init_out": True,
+        },
+    },
+    "rescor_mamba_rand": {
+        "class": ResCorMamba,
+        "description": (
+            "rescor_mamba with random-init Mamba out_proj (Kaiming default). "
+            "Probes whether zero-init residual discipline is load-bearing."
+        ),
+        "extra_kwargs": {
+            "cml_K": 32, "context_k": 4, "expand": 2, "zero_init_out": False,
+        },
+    },
+    "rescor_mamba_stat": {
+        "class": ResCorMambaStat,
+        "description": (
+            "rescor_mamba with stat-bank NCA (mean+min+max across K=32 "
+            "reservoirs; no variance), zero-init Mamba out_proj."
+        ),
+        "extra_kwargs": {
+            "cml_K": 32, "context_k": 4, "expand": 2, "zero_init_out": True,
+        },
+    },
+    "rescor_mamba_stat_rand": {
+        "class": ResCorMambaStat,
+        "description": (
+            "rescor_mamba_stat with random-init Mamba out_proj."
+        ),
+        "extra_kwargs": {
+            "cml_K": 32, "context_k": 4, "expand": 2, "zero_init_out": False,
+        },
+    },
+    "rescor_mamba_gated": {
+        "class": ResCorMambaGated,
+        "description": (
+            "Drift-gated rescor_mamba: per-cell sigmoid attenuates the "
+            "Mamba+NCA correction at high drift = sqrt(mean((x_now-cml_mean)^2)). "
+            "When predictions stray from the rens K=32 manifold the gate "
+            "closes, falling back to pure rens behavior. Two trainable "
+            "scalars (gate_scale, gate_bias). Zero-init Mamba out_proj."
+        ),
+        "extra_kwargs": {
+            "cml_K": 32, "context_k": 4, "expand": 2, "zero_init_out": True,
+        },
+    },
+    "rescor_mamba_gated_rand": {
+        "class": ResCorMambaGated,
+        "description": (
+            "rescor_mamba_gated with random-init Mamba out_proj. "
+            "Architectural fix targeting mamba_rand's H=100 catastrophe "
+            "on chaotic continuous benchmarks (gs/ks)."
+        ),
+        "extra_kwargs": {
+            "cml_K": 32, "context_k": 4, "expand": 2, "zero_init_out": False,
+        },
+    },
+    "rescor_rens_stat_no_var": {
+        "class": ResCorRensStatBank,
+        "description": "Variance-ablation baseline: rescor_rens + stat-bank NCA WITHOUT variance. NCA sees [x, cml_mean, cml_min, cml_max].",
+        "extra_kwargs": {"include_var": False},
+    },
     "rescor_e2": {
         "class": ResidualCorrectionWMv2,
         "description": "ResCor + multi-stat CML readouts (E2)",
@@ -230,6 +397,22 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "class": CML2DRidge,
         "description": "Fixed CML + Ridge readout (not nn.Module)",
     },
+    "discrete_rescor": {
+        "class": DiscreteRescor,
+        "description": (
+            "Discrete token rescor: CML+NCA world model for VQ-VAE token sequence prediction. "
+            "Embeds discrete token indices + action index, runs CML reservoir, applies NCA "
+            "correction in embedding space, outputs vocabulary logits for CE loss."
+        ),
+    },
+    "discrete_rescor_mamba": {
+        "class": DiscreteRescorMamba,
+        "description": (
+            "Discrete token rescor with per-cell Mamba SSM over K=4 temporal context frames. "
+            "Processes K consecutive token frames through a Mamba block before feeding "
+            "to the CML+NCA pipeline. Outputs vocabulary logits for CE loss."
+        ),
+    },
 }
 
 
@@ -274,6 +457,23 @@ def create_model(name: str, in_channels: int = 1, out_channels: int = 1,
         return cls(in_channels=in_channels, out_channels=out_channels,
                    seed=seed)
 
+    # Discrete token models — completely different constructor signature.
+    # These accept vocab_size, n_actions, embed_dim instead of in_channels/out_channels.
+    if name in ("discrete_rescor", "discrete_rescor_mamba"):
+        import inspect
+        sig = inspect.signature(cls.__init__)
+        kwargs_out: dict[str, Any] = {"use_sigmoid": False, "seed": seed}
+        # Forward known kwargs that match the constructor
+        for k in ("vocab_size", "n_actions", "embed_dim", "hidden_ch",
+                  "cml_K", "cml_steps", "r_lo", "r_hi", "mamba_context"):
+            if k in sig.parameters and k in kwargs:
+                kwargs_out[k] = kwargs[k]
+        # Merge extra_kwargs from registry entry
+        for k, v in entry.get("extra_kwargs", {}).items():
+            if k in sig.parameters:
+                kwargs_out[k] = v
+        return cls(**kwargs_out)
+
     # Hybrid models: all now accept in_channels, out_channels, seed,
     # and use_sigmoid. Cross-entropy tasks (out_ch != in_ch, or
     # identified by the caller) need raw logits, so use_sigmoid is
@@ -290,6 +490,14 @@ def create_model(name: str, in_channels: int = 1, out_channels: int = 1,
         kwargs_out["use_sigmoid"] = (out_channels == in_channels)
     if "seed" in sig.parameters:
         kwargs_out["seed"] = seed
+    # Merge extra_kwargs from registry entry (e.g., cml_gate for gated variants)
+    for k, v in entry.get("extra_kwargs", {}).items():
+        if k in sig.parameters:
+            kwargs_out[k] = v
+    # Forward any extra kwargs that match the constructor signature
+    for k, v in kwargs.items():
+        if k in sig.parameters:
+            kwargs_out[k] = v
     return cls(**kwargs_out)
 
 
@@ -300,6 +508,71 @@ def _ensure_tensor(arr, dev: torch.device) -> torch.Tensor:
     if isinstance(arr, torch.Tensor):
         return arr.float().to(dev)
     return torch.from_numpy(np.asarray(arr)).float().to(dev)
+
+
+def _extract_horizon_2_targets(Y: torch.Tensor, n_steps: int):
+    """Build a t+2 supervision tensor aligned with Y (t+1 targets).
+
+    ``_make_pairs`` flattens trajectories into contiguous (T,) blocks
+    where T = n_steps. For sample i, Y[i] is the t+1 target. The t+2
+    target is Y[i+1] EXCEPT when i is the last pair of a trajectory
+    (i.e., (i % T) == T-1) — there is no t+2 in that case.
+
+    Returns (Y_next, valid_mask):
+      Y_next: same shape as Y, with Y_next[i] = Y[i+1] when valid (and
+              a copy of Y[i] in invalid positions, never read).
+      valid_mask: bool tensor of shape (N,) — True where t+2 exists.
+    """
+    N = Y.shape[0]
+    # Y_next[i] := Y[i+1] when (i % n_steps) != n_steps-1.
+    Y_next = torch.empty_like(Y)
+    Y_next[:-1] = Y[1:]
+    Y_next[-1] = Y[-1]  # placeholder; mask makes this unread
+    idx = torch.arange(N, device=Y.device)
+    valid_mask = (idx % n_steps) != (n_steps - 1)
+    # Last sample of last trajectory is also invalid by construction
+    valid_mask[-1] = False
+    return Y_next, valid_mask
+
+
+def _extract_horizon_targets(Y: torch.Tensor, n_steps: int, H: int):
+    """Generalized t+1..t+H supervision tensor for multistep training.
+
+    Sample i has Y[i] = t+1 target (offset 0). The t+(1+h) target is
+    Y[i+h] for h in 0..H-1, valid only when (i % n_steps) + h <= n_steps-1.
+
+    Returns (Y_targets, valid_mask):
+      Y_targets: (N, H, *Y.shape[1:]) tensor; Y_targets[i, h] = Y[i+h]
+                 with the last valid copy padded into out-of-range slots
+                 (mask makes them unread).
+      valid_mask: bool tensor of shape (N,) — True where ALL H offsets
+                  fall inside the same trajectory (i.e. the sample has
+                  a full H-step ground-truth window).
+
+    H=2 is bit-identical to ``_extract_horizon_2_targets`` (same
+    Y_targets[:,1] layout and same valid_mask).
+    """
+    if H < 1:
+        raise ValueError(f"H must be >= 1, got {H}")
+    N = Y.shape[0]
+    rest = Y.shape[1:]
+    Y_targets = torch.empty((N, H, *rest), dtype=Y.dtype, device=Y.device)
+    Y_targets[:, 0] = Y
+    for h in range(1, H):
+        # Slot h: Y_targets[i, h] = Y[i + h] when in-range, else placeholder.
+        Y_targets[:N - h, h] = Y[h:]
+        if h > 0:
+            # Padding for last h positions (these are masked out anyway).
+            Y_targets[N - h:, h] = Y[N - 1]
+    idx = torch.arange(N, device=Y.device)
+    pos = idx % n_steps  # 0..n_steps-1 within trajectory
+    # Need pos + (H-1) <= n_steps - 1  =>  pos <= n_steps - H
+    valid_mask = pos <= (n_steps - H)
+    # Defensive: also bound by global tensor size — last (H-1) positions
+    # of the very last trajectory cannot have a t+H target.
+    if H > 1:
+        valid_mask[N - (H - 1):] = False
+    return Y_targets, valid_mask
 
 
 def train_model(
@@ -314,6 +587,17 @@ def train_model(
     lr: float = 1e-3,
     device: str | torch.device = "cpu",
     cml_reg_lambda: float = 0.1,
+    train_noise_sigma: float = 0.0,
+    pushforward: bool = False,
+    pushforward_n_steps: int | None = None,
+    pushforward_prob: float = 0.5,
+    multistep_horizon: int = 1,
+    multistep_bptt: int = 4,
+    multistep_weight_schedule: str = "uniform",
+    multistep_n_steps: int | None = None,
+    msdc_alpha: float = 0.0,
+    compile: bool = False,
+    bf16: bool = False,
     # Extra kwargs accepted (and ignored) for runner convenience
     benchmark_name: str | None = None,
     model_name: str | None = None,
@@ -321,10 +605,59 @@ def train_model(
     """Generic training loop. Handles MSE, BCE, and cross-entropy losses.
 
     For CMLRegularizedNCA, adds the regularization term automatically.
+    If ``train_noise_sigma > 0``, Gaussian noise with that std is added to
+    each training batch input ``xb`` before the forward pass. Noise is
+    applied only during training — ``evaluate_model`` and ``evaluate_rollout``
+    see clean inputs. This is the standard dynamical-systems trick to
+    regularize autoregressive rollout stability.
+
+    If ``pushforward=True`` (Brandstetter et al. 2022, "Message Passing
+    Neural PDE Solvers"), with probability ``pushforward_prob`` (default
+    0.5) per training step the loss is replaced with the pushforward
+    loss: a detached forward pass produces a t+1 prediction, the model is
+    re-fed that prediction (advancing the K-frame buffer for rank-5
+    inputs), and the resulting t+2 prediction is supervised against the
+    ground-truth t+2. Requires that pairs are arranged as contiguous
+    trajectory blocks of length ``pushforward_n_steps`` (the default,
+    inferred from ``len(Y_train) / N_traj`` is not safe — pass it
+    explicitly when known; if ``None``, falls back to assuming each
+    trajectory contributes the entire training tensor, which collapses
+    the mask and is supported only as a defensive default).
+
     Returns the trained model (best val checkpoint restored).
     """
     dev = torch.device(device) if isinstance(device, str) else device
     model = model.to(dev)
+
+    # Optional: torch.compile for kernel-launch overhead reduction.
+    # `reduce-overhead` mode uses CUDA Graphs + autotune (best for small
+    # models on CUDA). Falls back silently if compile is unavailable
+    # (e.g., CPU device, or model has unsupported Python-side state).
+    use_compile = bool(compile) and dev.type == "cuda"
+    raw_model = model  # keep eager handle for state_dict save/restore
+    if use_compile:
+        # `reduce-overhead` (CUDA Graphs) is unsafe in our training loop:
+        # the val pass and the pushforward double-forward both reuse
+        # outputs from the prior compiled call, which CUDAGraphs forbids
+        # without explicit `mark_step_begin`/clone discipline.
+        # `default` mode (Inductor without cudagraphs) is safe and still
+        # gives most of the kernel-fusion speedup.
+        compile_mode = "default"
+        try:
+            model = torch.compile(model, mode=compile_mode, fullgraph=False)
+            print(f"[train_model] torch.compile enabled (mode={compile_mode})")
+        except Exception as e:
+            print(f"[train_model] torch.compile failed ({type(e).__name__}: {e}); "
+                  f"falling back to eager mode")
+            use_compile = False
+            model = raw_model
+
+    # Optional: bf16 mixed precision via autocast. Optimizer params stay
+    # in fp32 (autocast only casts forward + loss). bf16 (not fp16) so
+    # the CML logistic-map reservoir near r=3.99 doesn't underflow.
+    use_bf16 = bool(bf16) and dev.type == "cuda"
+    if use_bf16:
+        print(f"[train_model] bf16 autocast enabled")
 
     # Split optimizer into two param groups so we can apply strong L2
     # weight decay selectively to "alpha" params (dilation gates, depth
@@ -334,14 +667,14 @@ def train_model(
     alpha_params: list[nn.Parameter] = []
     other_params: list[nn.Parameter] = []
 
-    if hasattr(model, "get_alpha_params"):
-        alpha_ids = {id(p) for p in model.get_alpha_params()}
-        for p in model.parameters():
+    if hasattr(raw_model, "get_alpha_params"):
+        alpha_ids = {id(p) for p in raw_model.get_alpha_params()}
+        for p in raw_model.parameters():
             if not p.requires_grad:
                 continue
             (alpha_params if id(p) in alpha_ids else other_params).append(p)
     else:
-        for pname, p in model.named_parameters():
+        for pname, p in raw_model.named_parameters():
             if not p.requires_grad:
                 continue
             if "dilation_alpha" in pname:
@@ -358,9 +691,9 @@ def train_model(
             lr=lr,
         )
     else:
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)
+        optimizer = torch.optim.Adam(raw_model.parameters(), lr=lr, weight_decay=0.0)
 
-    is_cml_reg = isinstance(model, CMLRegularizedNCA)
+    is_cml_reg = isinstance(raw_model, CMLRegularizedNCA)
 
     if loss_type == "mse":
         criterion = nn.MSELoss()
@@ -390,12 +723,108 @@ def train_model(
             return y.argmax(dim=1)  # (N, H, W) long
         return y.long().squeeze(1)
 
+    # Build t+2 supervision tensor for pushforward, if requested.
+    Y_next_tr: torch.Tensor | None = None
+    pf_valid_mask: torch.Tensor | None = None
+    if pushforward:
+        if is_cml_reg:
+            raise ValueError(
+                "pushforward=True is not supported with CMLRegularizedNCA "
+                "(dual-output model). Use a single-output rescor variant."
+            )
+        n_steps_pf = pushforward_n_steps
+        if n_steps_pf is None:
+            # Defensive default: treat the whole tensor as one trajectory
+            # block (so only the very last sample is masked out).
+            n_steps_pf = len(Y_tr)
+        Y_next_tr, pf_valid_mask = _extract_horizon_2_targets(Y_tr, n_steps_pf)
+
+    # ---- MSDC: drift-conditioned multistep loss validation ----------------
+    # msdc_alpha > 0 modulates per-step multistep losses by (1 - alpha * gate),
+    # so the gate gets a coherence-discrimination gradient. Enforce mutex
+    # with pushforward, with H=1, and require a model exposing compute_gate.
+    use_msdc = float(msdc_alpha) > 0.0
+    if use_msdc:
+        if pushforward:
+            raise ValueError(
+                "msdc_alpha > 0 is mutually exclusive with pushforward=True."
+            )
+        if multistep_horizon <= 1:
+            raise ValueError(
+                "msdc_alpha > 0 requires multistep_horizon > 1; "
+                f"got multistep_horizon={multistep_horizon}."
+            )
+        if not hasattr(raw_model, "compute_gate"):
+            raise ValueError(
+                "msdc_alpha > 0 requires a gated model exposing "
+                "`compute_gate`; got "
+                f"{type(raw_model).__name__} which does not."
+            )
+
+    # ---- Multistep penalty NODE loss (Chakraborty et al. 2024) -------------
+    # When multistep_horizon > 1, train by H-step rollout with truncated
+    # BPTT through the last K_bptt steps. Mutually exclusive with pushforward.
+    use_multistep = multistep_horizon > 1
+    Y_ms_tr: torch.Tensor | None = None
+    ms_valid_mask: torch.Tensor | None = None
+    ms_step_weights: torch.Tensor | None = None
+    if use_multistep:
+        if pushforward:
+            raise ValueError(
+                "multistep_horizon > 1 is mutually exclusive with "
+                "pushforward=True. Pick one training-time multi-step scheme."
+            )
+        if is_cml_reg:
+            raise ValueError(
+                "multistep_horizon > 1 is not supported with "
+                "CMLRegularizedNCA (dual-output model)."
+            )
+        if is_ce:
+            raise ValueError(
+                "multistep_horizon > 1 currently supports MSE/BCE only "
+                "(rollout state advance assumes continuous predictions)."
+            )
+        if multistep_bptt < 1 or multistep_bptt > multistep_horizon:
+            raise ValueError(
+                f"multistep_bptt must be in [1, multistep_horizon]; "
+                f"got bptt={multistep_bptt}, H={multistep_horizon}"
+            )
+        n_steps_ms = multistep_n_steps
+        if n_steps_ms is None:
+            n_steps_ms = len(Y_tr)
+        Y_ms_tr, ms_valid_mask = _extract_horizon_targets(
+            Y_tr, n_steps_ms, multistep_horizon
+        )
+        # Per-step weights (uniform or decay).
+        H_ms = multistep_horizon
+        if multistep_weight_schedule == "uniform":
+            w = torch.ones(H_ms, device=dev)
+        elif multistep_weight_schedule == "decay":
+            # Geometric decay (0.7^h), normalized to mean 1 so total scale ≈ H.
+            w = torch.tensor(
+                [0.7 ** h for h in range(H_ms)], dtype=torch.float32, device=dev
+            )
+            w = w * (H_ms / w.sum())
+        else:
+            raise ValueError(
+                f"Unknown multistep_weight_schedule "
+                f"'{multistep_weight_schedule}' (use 'uniform' or 'decay')"
+            )
+        ms_step_weights = w
+
     best_val_loss = float("inf")
     best_state: dict | None = None
     train_losses: list[float] = []
     val_losses: list[float] = []
 
     t0 = time.time()
+
+    # Autocast context manager (no-op when disabled).
+    from contextlib import nullcontext
+    def _amp_ctx():
+        if use_bf16:
+            return torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return nullcontext()
 
     for epoch in range(epochs):
         model.train()
@@ -407,28 +836,147 @@ def train_model(
             idx = perm[i : i + batch_size]
             xb, yb = X_tr[idx], Y_tr[idx]
 
-            if is_cml_reg:
-                nca_out, cml_ref = model(xb)
-                if is_ce:
-                    pred_loss = criterion(nca_out, _ce_target(yb))
-                    # For CE: nca_out is logits, cml_ref is in [0,1].
-                    # Regularize softmax(nca_out) toward cml_ref so both
-                    # are in the same [0,1] range.
-                    nca_probs = torch.softmax(nca_out, dim=1)
-                    reg_loss = F.mse_loss(nca_probs, cml_ref.detach())
+            # Noise injection on input x (training only).
+            # Intentionally applied to xb (the full input including any
+            # action channels for action-conditioned benchmarks) — matches
+            # the spec "perturb input x". Does not touch yb.
+            if train_noise_sigma > 0.0:
+                xb = xb + torch.randn_like(xb) * train_noise_sigma
+
+            # ---- Pushforward branch (Brandstetter et al. 2022) -----------
+            # With probability pushforward_prob and at least one valid t+2
+            # target in the batch, replace the standard loss with the
+            # pushforward loss: detached one-step forward, then re-feed the
+            # prediction and supervise the resulting two-step output
+            # against the ground-truth t+2.
+            do_pushforward = (
+                pushforward
+                and pf_valid_mask is not None
+                and Y_next_tr is not None
+                and torch.rand(1, device=dev).item() < pushforward_prob
+            )
+            if do_pushforward:
+                mask_b = pf_valid_mask[idx]
+                if mask_b.any():
+                    xb_v = xb[mask_b]
+                    y2_v = Y_next_tr[idx][mask_b]
+                    with torch.no_grad():
+                        with _amp_ctx():
+                            pred_t1 = model(xb_v)
+                            # Clone to escape CUDAGraphs static buffer reuse
+                            # if compile is enabled.
+                            if use_compile:
+                                pred_t1 = pred_t1.clone()
+                    # Build pushforward input depending on rank.
+                    # rank-4 (B, C, H, W): single-frame -> just feed pred.
+                    # rank-5 (B, K, C, H, W): K-frame buffer -> shift and
+                    # append the prediction at the most recent slot.
+                    if xb_v.dim() == 5:
+                        buf_pushed = torch.cat(
+                            [xb_v[:, 1:], pred_t1.unsqueeze(1)], dim=1
+                        )
+                    else:
+                        buf_pushed = pred_t1
+                    with _amp_ctx():
+                        pred_t2 = model(buf_pushed)
+                        if is_ce:
+                            loss = criterion(pred_t2, _ce_target(y2_v))
+                        else:
+                            loss = criterion(pred_t2, y2_v)
                 else:
-                    pred_loss = criterion(nca_out, yb)
-                    reg_loss = F.mse_loss(nca_out, cml_ref.detach())
-                loss = pred_loss + cml_reg_lambda * reg_loss
-            else:
-                pred = model(xb)
-                if is_ce:
-                    loss = criterion(pred, _ce_target(yb))
+                    # No valid t+2 in this batch — fall back to standard.
+                    do_pushforward = False
+
+            # ---- Multistep penalty branch -------------------------------
+            # H-step rollout, no_grad for first H-K_bptt steps, BPTT through
+            # the last K_bptt steps. Skips samples without a full ground-truth
+            # window of length H.
+            do_multistep = bool(
+                use_multistep
+                and ms_valid_mask is not None
+                and Y_ms_tr is not None
+                and not do_pushforward
+            )
+            if do_multistep:
+                mask_b = ms_valid_mask[idx]
+                if mask_b.any():
+                    xb_v = xb[mask_b]
+                    y_window = Y_ms_tr[idx][mask_b]  # (B', H, *Y.shape[1:])
+                    H_ms = multistep_horizon
+                    K_bptt = multistep_bptt
+                    n_no_grad = H_ms - K_bptt
+                    state = xb_v
+                    losses_h: list[torch.Tensor] = []
+                    for h in range(H_ms):
+                        if h < n_no_grad:
+                            with torch.no_grad():
+                                with _amp_ctx():
+                                    pred = model(state)
+                                    if use_compile:
+                                        pred = pred.clone()
+                        else:
+                            with _amp_ctx():
+                                pred = model(state)
+                        gt_h = y_window[:, h]
+                        # MSDC: drift-conditioned per-step weight.
+                        # `weight_h` is detached (no grad through weighting)
+                        # so the gate receives a coherence-aware signal but
+                        # cannot trivially game the loss by closing.
+                        if use_msdc:
+                            with torch.no_grad():
+                                gate_h = raw_model.compute_gate(state)
+                                weight_h = (1.0 - float(msdc_alpha) * gate_h)
+                            diff_sq = (pred.float() - gt_h.float()) ** 2
+                            loss_h = (weight_h.float() * diff_sq).mean()
+                        else:
+                            # Loss in fp32 for numerical stability under bf16.
+                            loss_h = F.mse_loss(pred.float(), gt_h.float())
+                        losses_h.append(loss_h * ms_step_weights[h])
+                        # Advance state.
+                        if h < H_ms - 1:
+                            if state.dim() == 5:
+                                # K-frame buffer: shift in pred at most-recent slot.
+                                pred_slot = pred.detach() if h < n_no_grad else pred
+                                new_buf = torch.cat(
+                                    [state[:, 1:], pred_slot.unsqueeze(1)], dim=1
+                                )
+                                state = new_buf
+                            else:
+                                state = pred.detach() if h < n_no_grad else pred
+                    loss = torch.stack(losses_h).sum() / H_ms
                 else:
-                    loss = criterion(pred, yb)
+                    # No valid sample in this batch — fall through to standard.
+                    do_multistep = False
+
+            if (not do_pushforward) and (not do_multistep):
+                with _amp_ctx():
+                    if is_cml_reg:
+                        nca_out, cml_ref = model(xb)
+                        if is_ce:
+                            pred_loss = criterion(nca_out, _ce_target(yb))
+                            # For CE: nca_out is logits, cml_ref is in [0,1].
+                            # Regularize softmax(nca_out) toward cml_ref so both
+                            # are in the same [0,1] range.
+                            nca_probs = torch.softmax(nca_out, dim=1)
+                            reg_loss = F.mse_loss(nca_probs, cml_ref.detach())
+                        else:
+                            pred_loss = criterion(nca_out, yb)
+                            reg_loss = F.mse_loss(nca_out, cml_ref.detach())
+                        loss = pred_loss + cml_reg_lambda * reg_loss
+                    else:
+                        pred = model(xb)
+                        if is_ce:
+                            loss = criterion(pred, _ce_target(yb))
+                        else:
+                            loss = criterion(pred, yb)
 
             optimizer.zero_grad()
             loss.backward()
+            # Gradient clipping: only for multistep (chaotic dynamics can
+            # amplify gradients ~50x per step; Mikhaeil 2022). Skip for
+            # H=1/pushforward to keep strict bit-identical backwards-compat.
+            if do_multistep:
+                torch.nn.utils.clip_grad_norm_(raw_model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
             n_batches += 1
@@ -444,11 +992,12 @@ def train_model(
             for vi in range(0, len(X_v), batch_size):
                 vx = X_v[vi : vi + batch_size]
                 vy = Y_v[vi : vi + batch_size]
-                vp = model(vx)
-                if is_ce:
-                    vl = criterion(vp, _ce_target(vy)).item()
-                else:
-                    vl = criterion(vp, vy).item()
+                with _amp_ctx():
+                    vp = model(vx)
+                    if is_ce:
+                        vl = criterion(vp, _ce_target(vy)).item()
+                    else:
+                        vl = criterion(vp, vy).item()
                 val_sum += vl * len(vx)
                 val_n += len(vx)
             val_loss = val_sum / max(val_n, 1)
@@ -457,18 +1006,19 @@ def train_model(
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in raw_model.state_dict().items()}
 
     train_time = time.time() - t0
 
     if best_state is not None:
-        model.load_state_dict(best_state)
-    model = model.to(torch.device("cpu")).eval()
+        raw_model.load_state_dict(best_state)
+    raw_model = raw_model.to(torch.device("cpu")).eval()
 
     del X_tr, Y_tr, X_v, Y_v
     gc.collect()
 
-    return model
+    return raw_model
 
 
 def train_ridge_model(
@@ -491,6 +1041,154 @@ def train_ridge_model(
         "alpha": alpha,
     }
     return cml_ridge, stats
+
+
+def train_discrete_rescor(
+    model: nn.Module,
+    tokens: np.ndarray,
+    next_tokens: np.ndarray,
+    actions: np.ndarray,
+    tokens_val: np.ndarray | None = None,
+    next_tokens_val: np.ndarray | None = None,
+    actions_val: np.ndarray | None = None,
+    epochs: int = 100,
+    batch_size: int = 64,
+    lr: float = 1.4e-3,
+    device: str | torch.device = "cpu",
+) -> nn.Module:
+    """Train a discrete token world model on VQ-VAE token sequences.
+
+    Works with both ``DiscreteRescor`` (single-frame) and
+    ``DiscreteRescorMamba`` (K=4 context frames). Uses CrossEntropyLoss
+    over vocabulary classes.
+
+    Args:
+        model: ``DiscreteRescor`` or ``DiscreteRescorMamba`` instance.
+        tokens: (N, H, W) int64 — current token grids.
+        next_tokens: (N, H, W) int64 — next-step token grids.
+        actions: (N,) int64 — action indices.
+        tokens_val, next_tokens_val, actions_val: optional validation set.
+        epochs: number of training epochs.
+        batch_size: batch size.
+        lr: learning rate (sqrt-rule adjusted from 1e-3 → 1.4e-3).
+        device: torch device.
+
+    Returns:
+        Trained model (best validation checkpoint restored).
+    """
+    dev = torch.device(device) if isinstance(device, str) else device
+    model = model.to(dev)
+
+    is_mamba = hasattr(model, "mamba_context")
+
+    # Convert data to tensors
+    tok_t = torch.from_numpy(np.asarray(tokens)).long().to(dev)
+    nxt_t = torch.from_numpy(np.asarray(next_tokens)).long().to(dev)
+    act_t = torch.from_numpy(np.asarray(actions)).long().to(dev)
+    N = len(tok_t)
+
+    if tokens_val is not None:
+        tok_v = torch.from_numpy(np.asarray(tokens_val)).long().to(dev)
+        nxt_v = torch.from_numpy(np.asarray(next_tokens_val)).long().to(dev)
+        act_v = torch.from_numpy(np.asarray(actions_val)).long().to(dev)
+    else:
+        n_val = max(1, N // 5)
+        tok_v = tok_t[-n_val:]
+        nxt_v = nxt_t[-n_val:]
+        act_v = act_t[-n_val:]
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    best_val_loss = float("inf")
+    best_state = None
+    t0 = time.time()
+
+    for epoch in range(epochs):
+        model.train()
+        perm = torch.randperm(N, device=dev)
+        total_loss = 0.0
+        n_batches = 0
+
+        for i in range(0, N, batch_size):
+            idx = perm[i : i + batch_size]
+            t_b = tok_t[idx]   # (B, H, W)  — single-frame input
+            n_b = nxt_t[idx]   # (B, H, W)  — target
+            a_b = act_t[idx]   # (B,)
+
+            if is_mamba:
+                # Mamba variant needs K=4 context: build from [batch_size, 4, H, W]
+                # Use shifted tokens: t_b = tokens at t, K-1 prior frames from tokens data
+                ctx_k = model.mamba_context
+                B = len(idx)
+                ctx = torch.zeros(B, ctx_k, *t_b.shape[1:], dtype=torch.long, device=dev)
+                # Fill most recent slot with current tokens
+                ctx[:, -1] = t_b
+                # Fill prior slots from earlier tokens (clamp to avoid negative indices)
+                for k in range(ctx_k - 1):
+                    offset = ctx_k - 1 - k
+                    prior_idx = idx - offset
+                    prior_idx = prior_idx.clamp(min=0)
+                    ctx[:, k] = tok_t[prior_idx]
+                logits = model(ctx, a_b)  # (B, V, H, W)
+            else:
+                logits = model(t_b, a_b)  # (B, V, H, W)
+
+            # CE loss: logits (B, V, H, W), target (B, H, W) long
+            loss = criterion(logits, n_b)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            n_batches += 1
+
+        avg_train = total_loss / max(n_batches, 1)
+
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            val_sum = 0.0
+            val_n = 0
+            for vi in range(0, len(tok_v), batch_size):
+                vx = tok_v[vi : vi + batch_size]
+                vy = nxt_v[vi : vi + batch_size]
+                va = act_v[vi : vi + batch_size]
+                if is_mamba:
+                    ctx_k_m = model.mamba_context
+                    Bv = len(vx)
+                    ctx_v = torch.zeros(Bv, ctx_k_m, *vx.shape[1:], dtype=torch.long, device=dev)
+                    ctx_v[:, -1] = vx
+                    for k in range(ctx_k_m - 1):
+                        offset = ctx_k_m - 1 - k
+                        prior_idx_v = torch.arange(vi, vi + Bv, device=dev) - offset
+                        prior_idx_v = prior_idx_v.clamp(min=0)
+                        ctx_v[:, k] = tok_t[prior_idx_v]
+                    vp = model(ctx_v, va)
+                else:
+                    vp = model(vx, va)
+                vl = criterion(vp, vy).item()
+                val_sum += vl * len(vx)
+                val_n += len(vx)
+            val_loss = val_sum / max(val_n, 1)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in model.state_dict().items()}
+
+    train_time = time.time() - t0
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model = model.to(torch.device("cpu")).eval()
+
+    # Clean up GPU tensors
+    del tok_t, nxt_t, act_t, tok_v, nxt_v, act_v
+    gc.collect()
+
+    return model
 
 
 # ===== Evaluation ============================================================

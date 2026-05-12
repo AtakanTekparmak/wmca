@@ -7,6 +7,10 @@ dependencies = [
     "numpy",
     "wandb",
     "python-dotenv",
+    "crafter>=1.8.3",
+    "scipy>=1.17.1",
+    "gymnasium[atari]>=1.3.0",
+    "ale-py>=0.11.2",
 ]
 
 [project.optional-dependencies]

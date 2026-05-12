@@ -4,32 +4,36 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from wmca.modules.mamba_block import MinimalMambaBlock
+
 
 class CML2D(nn.Module):
     """2D Coupled Map Lattice with frozen logistic map + conv2d coupling."""
 
     def __init__(self, in_channels: int = 1, steps: int = 15,
                  r: float = 3.90, eps: float = 0.3, beta: float = 0.15,
-                 seed: int = 42):
+                 seed: int = 42, kernel_size: int = 3):
         super().__init__()
         self.in_channels = in_channels
         self.steps = steps
+        self.kernel_size = kernel_size
 
         self.register_buffer("r", torch.tensor(r))
         self.register_buffer("eps", torch.tensor(eps))
         self.register_buffer("beta", torch.tensor(beta))
 
         rng = torch.Generator().manual_seed(seed)
-        K_raw = torch.rand(in_channels, 1, 3, 3, generator=rng).abs()
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size, generator=rng).abs()
         K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
         self.register_buffer("K_local", K_norm)
 
     def forward(self, drive: torch.Tensor) -> torch.Tensor:
         grid = drive
         r, eps, beta = self.r, self.eps, self.beta
+        pad = self.kernel_size // 2
         for _ in range(self.steps):
             mapped = r * grid * (1.0 - grid)
-            local = F.conv2d(mapped, self.K_local, padding=1,
+            local = F.conv2d(mapped, self.K_local, padding=pad,
                              groups=self.in_channels)
             physics = (1 - eps) * mapped + eps * local
             grid = (1 - beta) * physics + beta * drive
@@ -37,6 +41,880 @@ class CML2D(nn.Module):
 
     def param_count(self) -> dict[str, int]:
         return {"trained": 0, "frozen": sum(b.numel() for b in self.buffers())}
+
+
+class CML2DLearnedGateStatic(nn.Module):
+    """CML2D with learned per-cell (eps, beta) computed once from the input.
+
+    A tiny Conv2d(in_ch, 2, 3x3) gate maps the input state to spatially-varying
+    eps and beta maps. These are computed once and held fixed across all M CML
+    steps. Adds ~20 learned params. Default-initialized to match frozen defaults
+    (eps=0.30, beta=0.15).
+    """
+
+    def __init__(self, in_channels: int = 1, steps: int = 15,
+                 r: float = 3.90, eps_default: float = 0.3, beta_default: float = 0.15,
+                 eps_max: float = 0.8, beta_max: float = 0.5,
+                 seed: int = 42, kernel_size: int = 3):
+        super().__init__()
+        self.in_channels = in_channels
+        self.steps = steps
+        self.kernel_size = kernel_size
+        self.eps_max = eps_max
+        self.beta_max = beta_max
+
+        self.register_buffer("r", torch.tensor(r))
+
+        rng = torch.Generator().manual_seed(seed)
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size, generator=rng).abs()
+        K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
+        self.register_buffer("K_local", K_norm)
+
+        # Gate: input -> (eps_map, beta_map) per cell
+        self.gate = nn.Conv2d(in_channels, 2, 3, padding=1)
+        # Default-init: bias so sigmoid(bias) * max = default value
+        with torch.no_grad():
+            self.gate.weight.zero_()
+            # sigmoid(x) * max = default => x = logit(default / max)
+            eps_logit = torch.log(torch.tensor(eps_default / eps_max) / (1 - eps_default / eps_max))
+            beta_logit = torch.log(torch.tensor(beta_default / beta_max) / (1 - beta_default / beta_max))
+            self.gate.bias[0] = eps_logit
+            self.gate.bias[1] = beta_logit
+
+    def forward(self, drive: torch.Tensor) -> torch.Tensor:
+        grid = drive
+        r = self.r
+        pad = self.kernel_size // 2
+
+        # Compute eps/beta maps once from input (static)
+        eb = torch.sigmoid(self.gate(drive))  # (B, 2, H, W)
+        eps_map = eb[:, 0:1] * self.eps_max   # (B, 1, H, W)
+        beta_map = eb[:, 1:2] * self.beta_max
+
+        for _ in range(self.steps):
+            mapped = r * grid * (1.0 - grid)
+            local = F.conv2d(mapped, self.K_local, padding=pad,
+                             groups=self.in_channels)
+            physics = (1 - eps_map) * mapped + eps_map * local
+            grid = (1 - beta_map) * physics + beta_map * drive
+        return grid.clamp(1e-4, 1 - 1e-4)
+
+    def param_count(self) -> dict[str, int]:
+        trained = sum(p.numel() for p in self.gate.parameters())
+        frozen = sum(b.numel() for b in self.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+class CML2DLearnedGateDynamic(nn.Module):
+    """CML2D with learned per-cell (eps, beta) recomputed at each CML step.
+
+    Same gate as Static variant, but the gate reads the evolving grid state
+    at each step, allowing eps/beta to adapt as the CML dynamics unfold.
+    Adds ~20 learned params.
+    """
+
+    def __init__(self, in_channels: int = 1, steps: int = 15,
+                 r: float = 3.90, eps_default: float = 0.3, beta_default: float = 0.15,
+                 eps_max: float = 0.8, beta_max: float = 0.5,
+                 seed: int = 42, kernel_size: int = 3):
+        super().__init__()
+        self.in_channels = in_channels
+        self.steps = steps
+        self.kernel_size = kernel_size
+        self.eps_max = eps_max
+        self.beta_max = beta_max
+
+        self.register_buffer("r", torch.tensor(r))
+
+        rng = torch.Generator().manual_seed(seed)
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size, generator=rng).abs()
+        K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
+        self.register_buffer("K_local", K_norm)
+
+        # Gate: current grid state -> (eps_map, beta_map) per cell
+        self.gate = nn.Conv2d(in_channels, 2, 3, padding=1)
+        with torch.no_grad():
+            self.gate.weight.zero_()
+            eps_logit = torch.log(torch.tensor(eps_default / eps_max) / (1 - eps_default / eps_max))
+            beta_logit = torch.log(torch.tensor(beta_default / beta_max) / (1 - beta_default / beta_max))
+            self.gate.bias[0] = eps_logit
+            self.gate.bias[1] = beta_logit
+
+    def forward(self, drive: torch.Tensor) -> torch.Tensor:
+        grid = drive
+        r = self.r
+        pad = self.kernel_size // 2
+
+        for _ in range(self.steps):
+            # Recompute eps/beta from current grid state (dynamic)
+            eb = torch.sigmoid(self.gate(grid))
+            eps_map = eb[:, 0:1] * self.eps_max
+            beta_map = eb[:, 1:2] * self.beta_max
+
+            mapped = r * grid * (1.0 - grid)
+            local = F.conv2d(mapped, self.K_local, padding=pad,
+                             groups=self.in_channels)
+            physics = (1 - eps_map) * mapped + eps_map * local
+            grid = (1 - beta_map) * physics + beta_map * drive
+        return grid.clamp(1e-4, 1 - 1e-4)
+
+    def param_count(self) -> dict[str, int]:
+        trained = sum(p.numel() for p in self.gate.parameters())
+        frozen = sum(b.numel() for b in self.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+class CML2DDiscreteSelect(nn.Module):
+    """CML2D with discrete selection over K candidate (eps, beta) configs.
+
+    Learns a softmax selection over K pre-defined (eps, beta) pairs.
+    Gradient flows through the softmax weights only, completely bypassing
+    the chaotic CML interior. This avoids the gradient-through-chaos problem
+    that makes continuous eps/beta learning unstable (Mikhaeil et al. 2022).
+
+    Two modes:
+    - global: K logits shared across all cells (K learnable params)
+    - percell: Conv2d produces K logits per cell (~K*10 learnable params)
+    """
+
+    # Candidate configs from sweep results
+    CANDIDATES = [
+        (0.05, 0.01),   # weak coupling + free-running (good for KS)
+        (0.15, 0.05),   # weak coupling + weak drive
+        (0.15, 0.15),   # weak coupling + moderate drive (good for GS)
+        (0.30, 0.15),   # default (balanced)
+        (0.50, 0.30),   # strong coupling + strong drive (good for discrete CAs)
+    ]
+
+    def __init__(self, in_channels: int = 1, steps: int = 15,
+                 r: float = 3.90, seed: int = 42, kernel_size: int = 3,
+                 mode: str = "global", tau: float = 1.0,
+                 eps_default: float = 0.3, beta_default: float = 0.15):
+        super().__init__()
+        self.in_channels = in_channels
+        self.steps = steps
+        self.kernel_size = kernel_size
+        self.mode = mode
+        self.tau = tau
+        self.K = len(self.CANDIDATES)
+
+        self.register_buffer("r", torch.tensor(r))
+        self.register_buffer("candidates_eps",
+                             torch.tensor([c[0] for c in self.CANDIDATES]))
+        self.register_buffer("candidates_beta",
+                             torch.tensor([c[1] for c in self.CANDIDATES]))
+
+        rng = torch.Generator().manual_seed(seed)
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size, generator=rng).abs()
+        K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
+        self.register_buffer("K_local", K_norm)
+
+        if mode == "global":
+            # K learnable logits, init so default config (index 3) is favored
+            logits = torch.zeros(self.K)
+            # Find closest candidate to default
+            for i, (e, b) in enumerate(self.CANDIDATES):
+                if abs(e - eps_default) < 0.05 and abs(b - beta_default) < 0.05:
+                    logits[i] = 2.0  # favor this one at init
+                    break
+            self.logits = nn.Parameter(logits)
+        else:  # percell
+            self.gate = nn.Conv2d(in_channels, self.K, 3, padding=1)
+            with torch.no_grad():
+                self.gate.weight.zero_()
+                self.gate.bias.zero_()
+                for i, (e, b) in enumerate(self.CANDIDATES):
+                    if abs(e - eps_default) < 0.05 and abs(b - beta_default) < 0.05:
+                        self.gate.bias[i] = 2.0
+                        break
+
+    def forward(self, drive: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = drive.shape
+        r = self.r
+        pad = self.kernel_size // 2
+
+        # Compute selection weights
+        if self.mode == "global":
+            weights = F.softmax(self.logits / self.tau, dim=0)  # (K,)
+            eps = (weights * self.candidates_eps).sum()
+            beta = (weights * self.candidates_beta).sum()
+        else:
+            logits = self.gate(drive)  # (B, K, H, W)
+            weights = F.softmax(logits / self.tau, dim=1)  # (B, K, H, W)
+            eps = (weights * self.candidates_eps[None, :, None, None]).sum(dim=1, keepdim=True)
+            beta = (weights * self.candidates_beta[None, :, None, None]).sum(dim=1, keepdim=True)
+
+        # Run CML with selected eps/beta (gradient only through weights, not CML)
+        grid = drive
+        for _ in range(self.steps):
+            mapped = r * grid * (1.0 - grid)
+            local = F.conv2d(mapped, self.K_local, padding=pad,
+                             groups=self.in_channels)
+            physics = (1 - eps) * mapped + eps * local
+            grid = (1 - beta) * physics + beta * drive
+        return grid.clamp(1e-4, 1 - 1e-4)
+
+    def get_selection_info(self) -> dict:
+        """Return the learned selection weights and effective eps/beta."""
+        if self.mode == "global":
+            weights = F.softmax(self.logits / self.tau, dim=0)
+            eps = (weights * self.candidates_eps).sum().item()
+            beta = (weights * self.candidates_beta).sum().item()
+            return {
+                "weights": {f"({e:.2f},{b:.2f})": w.item()
+                           for (e, b), w in zip(self.CANDIDATES, weights)},
+                "effective_eps": eps,
+                "effective_beta": beta,
+            }
+        return {"mode": "percell"}
+
+    def param_count(self) -> dict[str, int]:
+        if self.mode == "global":
+            return {"trained": self.K, "frozen": sum(b.numel() for b in self.buffers())}
+        trained = sum(p.numel() for p in self.gate.parameters())
+        frozen = sum(b.numel() for b in self.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+class CML2DMultiConfig(nn.Module):
+    """K parallel CML2D passes with distinct (eps, beta), blended by learned softmax.
+
+    Runs K separate CML forward passes (each with its own frozen eps/beta config),
+    detaches their outputs, and blends them with learned softmax weights. The gradient
+    to the selection logits is d(loss)/d(blend) * cml_out_k -- no CML interior in the
+    backward pass at all. This cleanly bypasses the chaotic gradient problem.
+
+    Default K=3 candidates:
+      - (0.15, 0.01): weak coupling + free-running (KS-optimal from sweep)
+      - (0.30, 0.15): balanced default
+      - (0.50, 0.30): strong coupling + strong drive (good for discrete CAs)
+    """
+
+    CANDIDATES = [
+        (0.15, 0.01),   # KS-optimal
+        (0.30, 0.15),   # default
+        (0.50, 0.30),   # discrete-CA-optimal
+    ]
+
+    def __init__(self, in_channels: int = 1, steps: int = 15,
+                 r: float = 3.90, seed: int = 42, kernel_size: int = 3,
+                 mode: str = "global", candidates: list | None = None,
+                 warm_start_idx: int | None = None, warm_start_logit: float = 2.0):
+        super().__init__()
+        self.in_channels = in_channels
+        self.steps = steps
+        self.kernel_size = kernel_size
+        self.mode = mode
+        if candidates is not None:
+            self.CANDIDATES = list(candidates)
+        self.K = len(self.CANDIDATES)
+
+        # Build K frozen CML2D instances
+        self.cmls = nn.ModuleList()
+        for eps_k, beta_k in self.CANDIDATES:
+            cml = CML2D(in_channels, steps, r, eps_k, beta_k, seed, kernel_size)
+            for p in cml.parameters():
+                p.requires_grad = False
+            self.cmls.append(cml)
+
+        # Learnable selection logits (optionally warm-started toward a candidate)
+        init_logits = torch.zeros(self.K)
+        if warm_start_idx is not None and 0 <= warm_start_idx < self.K:
+            init_logits[warm_start_idx] = warm_start_logit
+        if mode == "global":
+            self.logits = nn.Parameter(init_logits.clone())
+        else:  # percell
+            self.gate = nn.Conv2d(in_channels, self.K, 3, padding=1)
+            with torch.no_grad():
+                self.gate.weight.zero_()
+                self.gate.bias.copy_(init_logits)
+
+    def forward(self, drive: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = drive.shape
+
+        # Run K CML passes, detach each output (no gradient through CML)
+        cml_outs = []
+        for cml in self.cmls:
+            with torch.no_grad():
+                cml_outs.append(cml(drive))
+
+        # Concat mode: stack all K outputs as channels, return (B, K*C, H, W)
+        # No blending — the downstream NCA can pick features via conv weights.
+        if self.mode == "concat":
+            return torch.cat(cml_outs, dim=1)  # (B, K*C, H, W)
+
+        # (K, B, C, H, W) -> (B, K, C, H, W)
+        cml_stack = torch.stack(cml_outs, dim=1)  # detached by construction
+
+        # Compute blending weights
+        if self.mode == "global":
+            weights = F.softmax(self.logits, dim=0)  # (K,)
+            # Reshape for broadcast: (1, K, 1, 1, 1)
+            w = weights.view(1, self.K, 1, 1, 1)
+        else:
+            logits = self.gate(drive)  # (B, K, H, W)
+            weights = F.softmax(logits, dim=1)  # (B, K, H, W)
+            w = weights.unsqueeze(2)  # (B, K, 1, H, W)
+
+        # Weighted blend: gradient flows through w only, not through cml_stack
+        blended = (w * cml_stack).sum(dim=1)  # (B, C, H, W)
+        return blended
+
+    def get_selection_info(self) -> dict:
+        """Return learned weights and effective (eps, beta)."""
+        if self.mode == "global":
+            weights = F.softmax(self.logits, dim=0)
+            eps = sum(w.item() * c[0] for w, c in zip(weights, self.CANDIDATES))
+            beta = sum(w.item() * c[1] for w, c in zip(weights, self.CANDIDATES))
+            return {
+                "weights": {f"({e:.2f},{b:.2f})": w.item()
+                           for (e, b), w in zip(self.CANDIDATES, weights)},
+                "effective_eps": eps,
+                "effective_beta": beta,
+            }
+        return {"mode": "percell"}
+
+    def param_count(self) -> dict[str, int]:
+        if self.mode == "global":
+            trained = self.K
+        else:
+            trained = sum(p.numel() for p in self.gate.parameters())
+        frozen = sum(b.numel() for m in self.cmls for b in m.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+class CML2DRandomReservoir(nn.Module):
+    """K parallel frozen reservoirs with random coupling kernels. No oracle (eps, beta).
+
+    Eliminates the two oracle heuristics in CML2DMultiConfig:
+      1. No hand-picked (eps, beta) per reservoir — all K share a single default.
+      2. No warm-start — gate init is uniform.
+
+    Diversity comes entirely from K distinct random coupling kernels (one per
+    reservoir, distinct RNG seeds). Gradient isolation (no_grad) is preserved.
+
+    Two modes for local dynamics:
+      - ``preserved``: keeps logistic f(x) = r*x*(1-x). CA/physics inductive bias
+        retained; only the coupling varies across reservoirs.
+      - ``full``: drops the logistic, ESN-style tanh recurrence on [-1, 1]-centered
+        grid. No physics-specific nonlinearity; all dynamical diversity is random.
+    """
+
+    def __init__(self, in_channels: int = 1, K: int = 8, steps: int = 15,
+                 r: float = 3.90, eps: float = 0.3, beta: float = 0.15,
+                 seed: int = 42, kernel_size: int = 3,
+                 mode: str = "preserved", conditioned: bool = False,
+                 cond_hidden: int = 8, gate_mode: str = "learned"):
+        super().__init__()
+        assert mode in ("preserved", "full"), f"Unknown mode {mode}"
+        assert gate_mode in ("learned", "uniform"), f"Unknown gate_mode {gate_mode}"
+        self.in_channels = in_channels
+        self.K = K
+        self.steps = steps
+        self.kernel_size = kernel_size
+        self.mode = mode
+        self.conditioned = conditioned
+        self.gate_mode = gate_mode
+
+        self.register_buffer("r", torch.tensor(r))
+        self.register_buffer("eps", torch.tensor(eps))
+        self.register_buffer("beta", torch.tensor(beta))
+
+        kernels = []
+        for k in range(K):
+            rng = torch.Generator().manual_seed(seed + 10_000 * (k + 1))
+            K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size,
+                               generator=rng).abs()
+            K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
+            kernels.append(K_norm)
+        self.register_buffer("kernels", torch.stack(kernels, dim=0))
+
+        if gate_mode == "learned":
+            self.logits = nn.Parameter(torch.zeros(K))
+            if conditioned:
+                self.cond_gate = nn.Sequential(
+                    nn.Linear(3, cond_hidden),
+                    nn.ReLU(),
+                    nn.Linear(cond_hidden, K),
+                )
+                nn.init.zeros_(self.cond_gate[-1].weight)
+                nn.init.zeros_(self.cond_gate[-1].bias)
+
+    def _run_batched(self, drive: torch.Tensor) -> torch.Tensor:
+        """Run all K reservoirs in parallel via a single grouped conv2d per step.
+
+        Replaces the K-way Python loop with one conv2d call that has K*C groups —
+        PyTorch/OpenMP parallelises across groups internally, giving ~K× speedup
+        on CPU and much more on MPS/CUDA.
+
+        Output shape: (B, K, C, H, W).
+        """
+        B, C, H, W = drive.shape
+        K = self.K
+        pad = self.kernel_size // 2
+        # (K, C, 1, kh, kw) -> (K*C, 1, kh, kw) for grouped conv with K*C groups
+        weight = self.kernels.reshape(K * C, 1, self.kernel_size, self.kernel_size)
+        drive_rep = drive.repeat(1, K, 1, 1)  # (B, K*C, H, W)
+        r, eps, beta = self.r, self.eps, self.beta
+
+        if self.mode == "preserved":
+            grid = drive_rep
+            for _ in range(self.steps):
+                mapped = r * grid * (1.0 - grid)
+                local = F.conv2d(mapped, weight, padding=pad, groups=K * C)
+                physics = (1 - eps) * mapped + eps * local
+                grid = (1 - beta) * physics + beta * drive_rep
+            out = grid.clamp(1e-4, 1 - 1e-4)
+        else:  # full
+            drive_c = drive_rep * 2.0 - 1.0
+            grid = drive_c
+            for _ in range(self.steps):
+                local = F.conv2d(grid, weight, padding=pad, groups=K * C)
+                physics = (1 - eps) * grid + eps * local
+                mixed = (1 - beta) * physics + beta * drive_c
+                grid = torch.tanh(mixed)
+            out = ((grid + 1.0) / 2.0).clamp(1e-4, 1 - 1e-4)
+
+        return out.reshape(B, K, C, H, W)
+
+    def _input_stats(self, drive: torch.Tensor) -> torch.Tensor:
+        """Per-sample stats for the conditioned gate: (mean, var, grad-norm). Shape (B, 3)."""
+        B = drive.shape[0]
+        mean = drive.reshape(B, -1).mean(dim=1)
+        var = drive.reshape(B, -1).var(dim=1)
+        dy = drive[:, :, 1:, :] - drive[:, :, :-1, :]
+        dx = drive[:, :, :, 1:] - drive[:, :, :, :-1]
+        gnorm = (dy.pow(2).reshape(B, -1).mean(dim=1)
+                 + dx.pow(2).reshape(B, -1).mean(dim=1)).sqrt()
+        return torch.stack([mean, var, gnorm], dim=1)
+
+    def forward(self, drive: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            stack = self._run_batched(drive)  # (B, K, C, H, W)
+
+        if self.gate_mode == "uniform":
+            # Strict 1/K averaging — zero trainable gate params.
+            w = torch.full((self.K,), 1.0 / self.K,
+                           device=stack.device, dtype=stack.dtype).view(1, self.K, 1, 1, 1)
+            return (w * stack).sum(dim=1)
+
+        if self.conditioned:
+            stats = self._input_stats(drive)  # (B, 3)
+            logits = self.logits.unsqueeze(0) + self.cond_gate(stats)  # (B, K)
+            logits = logits.clamp(-20.0, 20.0)  # prevent runaway softmax
+            w = F.softmax(logits, dim=1).view(-1, self.K, 1, 1, 1)
+        else:
+            w = F.softmax(self.logits, dim=0).view(1, self.K, 1, 1, 1)
+        return (w * stack).sum(dim=1)
+
+    def get_selection_info(self) -> dict:
+        if self.gate_mode == "uniform":
+            u = 1.0 / self.K
+            return {
+                "mode": self.mode, "K": self.K, "gate_mode": "uniform",
+                "conditioned": False,
+                "weights": [u] * self.K, "top_idx": 0, "top_weight": u,
+                "entropy": float(torch.log(torch.tensor(float(self.K))).item()),
+            }
+        weights = F.softmax(self.logits, dim=0).detach()
+        w_list = weights.tolist()
+        return {
+            "mode": self.mode,
+            "K": self.K,
+            "gate_mode": "learned",
+            "conditioned": self.conditioned,
+            "weights": w_list,
+            "top_idx": int(weights.argmax().item()),
+            "top_weight": float(weights.max().item()),
+            "entropy": float(-(weights * (weights + 1e-12).log()).sum().item()),
+        }
+
+    def param_count(self) -> dict[str, int]:
+        if self.gate_mode == "uniform":
+            trained = 0
+        else:
+            trained = self.K
+            if self.conditioned:
+                trained += sum(p.numel() for p in self.cond_gate.parameters())
+        return {
+            "trained": trained,
+            "frozen": sum(b.numel() for b in self.buffers()),
+        }
+
+
+class CML2DMultiR(nn.Module):
+    """K parallel frozen CMLs sharing a single coupling kernel but with K different r values.
+
+    "Vanilla rescor" scaling via chaos-depth diversity. Each of K reservoirs runs the
+    SAME coupling kernel (sum-to-1 local averaging, identical to vanilla CML2D at a
+    given seed), the SAME (eps, beta), but a DIFFERENT logistic r in [r_lo, r_hi].
+    Diversity comes purely from chaos depth, not random spatial structure — this keeps
+    the CML's physics identity intact.
+
+    r values are log-spaced (dense near r_lo, sparse near r_hi) — linear spacing puts
+    too many points in the fully-chaotic regime. The r-sweep earlier showed Heat/GS
+    prefer r=3.70, KS prefers r=3.57, discrete CAs prefer r>=3.90.
+
+    Gate modes:
+      - "learned":  K-way softmax with trainable logits (uniform init, no warm-start).
+      - "uniform":  Strict 1/K averaging, zero trainable gate params.
+    """
+
+    def __init__(self, in_channels: int = 1, K: int = 8, steps: int = 15,
+                 r_lo: float = 3.57, r_hi: float = 3.99,
+                 eps: float = 0.3, beta: float = 0.15,
+                 seed: int = 42, kernel_size: int = 3,
+                 gate_mode: str = "learned"):
+        super().__init__()
+        assert gate_mode in ("learned", "uniform"), f"Unknown gate_mode {gate_mode}"
+        self.in_channels = in_channels
+        self.K = K
+        self.steps = steps
+        self.kernel_size = kernel_size
+        self.gate_mode = gate_mode
+
+        # K different r values linearly interpolated across [r_lo, r_hi]
+        if K == 1:
+            r_values = torch.tensor([0.5 * (r_lo + r_hi)])
+        else:
+            r_values = torch.linspace(r_lo, r_hi, K)
+        self.register_buffer("r_values", r_values)
+        self.register_buffer("eps", torch.tensor(eps))
+        self.register_buffer("beta", torch.tensor(beta))
+
+        # One shared coupling kernel — identical to vanilla CML2D at this seed.
+        rng = torch.Generator().manual_seed(seed)
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size,
+                           generator=rng).abs()
+        K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
+        self.register_buffer("K_local", K_norm)
+
+        if gate_mode == "learned":
+            self.logits = nn.Parameter(torch.zeros(K))
+
+    def _run_batched(self, drive: torch.Tensor) -> torch.Tensor:
+        """Run all K CMLs in parallel. Same coupling, different r per reservoir."""
+        # Logistic map r·x·(1-x) is only stable on [0, 1]; x outside explodes
+        # in ~6 iterations at r≈3.99. Clamp defensively so callers that inject
+        # noise or feed unbounded features don't NaN the reservoir.
+        drive = drive.clamp(0.0, 1.0)
+        B, C, H, W = drive.shape
+        K = self.K
+        pad = self.kernel_size // 2
+
+        # Broadcast the shared kernel K times (grouped conv with K*C groups)
+        weight = self.K_local.repeat(K, 1, 1, 1)  # (K*C, 1, kh, kw)
+        drive_rep = drive.repeat(1, K, 1, 1)  # (B, K*C, H, W)
+
+        # r needs to be broadcast over (B, K*C, H, W):
+        # r_values (K,) -> (1, K, 1, 1, 1) -> expand C times -> reshape to (1, K*C, 1, 1)
+        r_b = self.r_values.view(1, K, 1, 1, 1).expand(1, K, C, 1, 1).reshape(1, K * C, 1, 1)
+        eps, beta = self.eps, self.beta
+
+        grid = drive_rep
+        for _ in range(self.steps):
+            mapped = r_b * grid * (1.0 - grid)
+            local = F.conv2d(mapped, weight, padding=pad, groups=K * C)
+            physics = (1 - eps) * mapped + eps * local
+            grid = (1 - beta) * physics + beta * drive_rep
+        out = grid.clamp(1e-4, 1 - 1e-4)
+        return out.reshape(B, K, C, H, W)
+
+    def forward(self, drive: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            stack = self._run_batched(drive)  # (B, K, C, H, W)
+
+        if self.gate_mode == "uniform":
+            w = torch.full((self.K,), 1.0 / self.K,
+                           device=stack.device, dtype=stack.dtype).view(1, self.K, 1, 1, 1)
+        else:
+            w = F.softmax(self.logits, dim=0).view(1, self.K, 1, 1, 1)
+        return (w * stack).sum(dim=1)
+
+    def get_selection_info(self) -> dict:
+        if self.gate_mode == "uniform":
+            u = 1.0 / self.K
+            return {
+                "K": self.K, "gate_mode": "uniform",
+                "r_values": self.r_values.tolist(),
+                "weights": [u] * self.K, "top_idx": 0, "top_weight": u,
+                "entropy": float(torch.log(torch.tensor(float(self.K))).item()),
+            }
+        weights = F.softmax(self.logits, dim=0).detach()
+        return {
+            "K": self.K, "gate_mode": "learned",
+            "r_values": self.r_values.tolist(),
+            "weights": weights.tolist(),
+            "top_idx": int(weights.argmax().item()),
+            "top_weight": float(weights.max().item()),
+            "top_r": float(self.r_values[weights.argmax().item()].item()),
+            "entropy": float(-(weights * (weights + 1e-12).log()).sum().item()),
+        }
+
+    def param_count(self) -> dict[str, int]:
+        trained = 0 if self.gate_mode == "uniform" else self.K
+        return {
+            "trained": trained,
+            "frozen": sum(b.numel() for b in self.buffers()),
+        }
+
+
+class CML2DHybridMrEsn(nn.Module):
+    """Hybrid MR + ESN reservoir bank with uniform 1/K averaging.
+
+    Combines two diversity axes:
+      - K_mr vanilla logistic CMLs with SHARED coupling kernel, different r values
+        (chaos-depth axis — wins on heat, gol, ks, wireworld)
+      - K_esn tanh reservoirs with RANDOM coupling kernels, fixed (eps, beta)
+        (random-spatial axis — wins on gray_scott)
+
+    Both banks run under no_grad, outputs concatenated along the K-axis, then
+    uniformly averaged (1/K weights — zero trainable gate params).
+
+    Total K = K_mr + K_esn. Trained params = 321 (NCA only), same as vanilla rescor.
+    """
+
+    def __init__(self, in_channels: int = 1, K_mr: int = 16, K_esn: int = 16,
+                 steps: int = 15, r_lo: float = 3.57, r_hi: float = 3.99,
+                 eps: float = 0.3, beta: float = 0.15,
+                 seed: int = 42, kernel_size: int = 3):
+        super().__init__()
+        self.in_channels = in_channels
+        self.K_mr = K_mr
+        self.K_esn = K_esn
+        self.K = K_mr + K_esn
+        self.steps = steps
+        self.kernel_size = kernel_size
+
+        if K_mr == 1:
+            r_values = torch.tensor([0.5 * (r_lo + r_hi)])
+        else:
+            r_values = torch.linspace(r_lo, r_hi, K_mr) if K_mr > 0 else torch.empty(0)
+        self.register_buffer("r_values", r_values)
+        self.register_buffer("eps", torch.tensor(eps))
+        self.register_buffer("beta", torch.tensor(beta))
+
+        # MR shared coupling kernel (seed-determined, matches vanilla CML2D at this seed)
+        rng = torch.Generator().manual_seed(seed)
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size,
+                           generator=rng).abs()
+        K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
+        self.register_buffer("mr_kernel", K_norm)
+
+        # ESN random kernels — distinct seeds, same pattern as CML2DRandomReservoir
+        esn_kernels = []
+        for k in range(K_esn):
+            rng_k = torch.Generator().manual_seed(seed + 10_000 * (k + 1))
+            K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size,
+                               generator=rng_k).abs()
+            K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
+            esn_kernels.append(K_norm)
+        if K_esn > 0:
+            self.register_buffer("esn_kernels", torch.stack(esn_kernels, dim=0))
+        else:
+            self.register_buffer("esn_kernels", torch.empty(0))
+
+    def _run_mr(self, drive: torch.Tensor) -> torch.Tensor:
+        """K_mr logistic CMLs with shared coupling, different r values."""
+        if self.K_mr == 0:
+            return drive.new_empty(drive.shape[0], 0, drive.shape[1],
+                                   drive.shape[2], drive.shape[3])
+        B, C, H, W = drive.shape
+        K = self.K_mr
+        pad = self.kernel_size // 2
+        weight = self.mr_kernel.repeat(K, 1, 1, 1)  # (K*C, 1, kh, kw)
+        drive_rep = drive.repeat(1, K, 1, 1)  # (B, K*C, H, W)
+        r_b = self.r_values.view(1, K, 1, 1, 1).expand(1, K, C, 1, 1).reshape(1, K * C, 1, 1)
+        eps, beta = self.eps, self.beta
+
+        grid = drive_rep
+        for _ in range(self.steps):
+            mapped = r_b * grid * (1.0 - grid)
+            local = F.conv2d(mapped, weight, padding=pad, groups=K * C)
+            physics = (1 - eps) * mapped + eps * local
+            grid = (1 - beta) * physics + beta * drive_rep
+        out = grid.clamp(1e-4, 1 - 1e-4)
+        return out.reshape(B, K, C, H, W)
+
+    def _run_esn(self, drive: torch.Tensor) -> torch.Tensor:
+        """K_esn tanh reservoirs with random coupling, fixed (eps, beta)."""
+        if self.K_esn == 0:
+            return drive.new_empty(drive.shape[0], 0, drive.shape[1],
+                                   drive.shape[2], drive.shape[3])
+        B, C, H, W = drive.shape
+        K = self.K_esn
+        pad = self.kernel_size // 2
+        weight = self.esn_kernels.reshape(K * C, 1, self.kernel_size, self.kernel_size)
+        drive_rep = drive.repeat(1, K, 1, 1)
+        drive_c = drive_rep * 2.0 - 1.0
+        eps, beta = self.eps, self.beta
+
+        grid = drive_c
+        for _ in range(self.steps):
+            local = F.conv2d(grid, weight, padding=pad, groups=K * C)
+            physics = (1 - eps) * grid + eps * local
+            mixed = (1 - beta) * physics + beta * drive_c
+            grid = torch.tanh(mixed)
+        out = ((grid + 1.0) / 2.0).clamp(1e-4, 1 - 1e-4)
+        return out.reshape(B, K, C, H, W)
+
+    def forward(self, drive: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            mr_stack = self._run_mr(drive)
+            esn_stack = self._run_esn(drive)
+        stack = torch.cat([mr_stack, esn_stack], dim=1)  # (B, K_mr+K_esn, C, H, W)
+        w = 1.0 / float(self.K)
+        return w * stack.sum(dim=1)
+
+    def get_selection_info(self) -> dict:
+        u = 1.0 / self.K
+        return {
+            "K": self.K, "K_mr": self.K_mr, "K_esn": self.K_esn,
+            "gate_mode": "uniform",
+            "r_values": self.r_values.tolist(),
+            "weights": [u] * self.K, "top_idx": 0, "top_weight": u,
+            "entropy": float(torch.log(torch.tensor(float(self.K))).item()),
+        }
+
+    def param_count(self) -> dict[str, int]:
+        return {"trained": 0, "frozen": sum(b.numel() for b in self.buffers())}
+
+
+class ResCorRensStatBank(nn.Module):
+    """rescor_rens K=32 with stat-bank NCA (C-variant from deeper_nca_plan.md).
+
+    Same K=32 r-ensemble frozen reservoir bank as rescor_mr_uniform, but the NCA
+    sees full ensemble statistics across K reservoirs (not just the mean):
+      - include_var=True:  NCA input = [x, cml_mean, cml_var, cml_min, cml_max]
+      - include_var=False: NCA input = [x, cml_mean, cml_min, cml_max]
+
+    Residual is against cml_mean (same as vanilla rescor_rens).
+    Variance ablation (with vs. without) isolates whether ensemble spread carries
+    task-relevant information beyond the mean.
+    """
+
+    def __init__(self, in_channels: int = 1, hidden_ch: int = 16,
+                 cml_steps: int = 15,
+                 r_lo: float = 3.57, r_hi: float = 3.99,
+                 eps: float = 0.3, beta: float = 0.15,
+                 seed: int = 42, out_channels: int | None = None,
+                 use_sigmoid: bool = True, kernel_size: int = 3,
+                 cml_K: int = 32, include_var: bool = True):
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        assert in_channels == out_channels, (
+            "ResCorRensStatBank requires in_channels == out_channels"
+        )
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.use_sigmoid = use_sigmoid
+        self.include_var = include_var
+
+        self.rens = CML2DMultiR(
+            in_channels=in_channels, K=cml_K, steps=cml_steps,
+            r_lo=r_lo, r_hi=r_hi, eps=eps, beta=beta,
+            seed=seed, kernel_size=kernel_size, gate_mode="uniform",
+        )
+
+        # Stat count: mean + (var if include_var) + min + max
+        n_stats = 4 if include_var else 3
+        nca_in = in_channels + n_stats * in_channels  # x + stats
+        self.nca = nn.Sequential(
+            nn.Conv2d(nca_in, hidden_ch, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_ch, out_channels, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            stack = self.rens._run_batched(x)  # (B, K, C, H, W)
+            cml_mean = stack.mean(dim=1)
+            cml_min = stack.min(dim=1).values
+            cml_max = stack.max(dim=1).values
+            if self.include_var:
+                cml_var = stack.var(dim=1)
+                stats = torch.cat([cml_mean, cml_var, cml_min, cml_max], dim=1)
+            else:
+                stats = torch.cat([cml_mean, cml_min, cml_max], dim=1)
+
+        correction = self.nca(torch.cat([x, stats], dim=1))
+        out = cml_mean + correction
+        if self.use_sigmoid:
+            out = torch.clamp(out, 0, 1)
+        return out
+
+    def param_count(self) -> dict[str, int]:
+        trained = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen = sum(b.numel() for b in self.rens.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+class ResCorRensDeep(nn.Module):
+    """Deep stack of L rescor_rens stages (each = K=32 r-ensemble + NCA correction).
+
+    Each stage is a self-contained ResCor cell: K frozen logistic CMLs with K
+    different r values, uniformly 1/K averaged, plus a tiny NCA (321 params)
+    that corrects the averaged output via residual addition. Stages are chained
+    — later stages receive the prior stage's corrected prediction and refine it.
+
+    Trained params: 321 * L (NCA only, no gate params).
+    Frozen params: ~43 per stage (K r-values, shared coupling kernel, eps, beta).
+
+    Requires in_channels == out_channels (state rolls through stages).
+    """
+
+    def __init__(self, in_channels: int = 1, hidden_ch: int = 16,
+                 cml_steps: int = 15, r: float = 3.90,
+                 r_lo: float = 3.57, r_hi: float = 3.99,
+                 eps: float = 0.3, beta: float = 0.15,
+                 seed: int = 42, out_channels: int | None = None,
+                 use_sigmoid: bool = True, kernel_size: int = 3,
+                 cml_K: int = 32, L: int = 2):
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        assert in_channels == out_channels, (
+            "ResCorRensDeep requires in_channels == out_channels "
+            "(state rolls through stages)"
+        )
+        self.L = L
+        self.out_channels = out_channels
+        self.use_sigmoid = use_sigmoid
+
+        self.rens_banks = nn.ModuleList()
+        self.ncas = nn.ModuleList()
+        for stage_idx in range(L):
+            self.rens_banks.append(
+                CML2DMultiR(
+                    in_channels=in_channels, K=cml_K, steps=cml_steps,
+                    r_lo=r_lo, r_hi=r_hi, eps=eps, beta=beta,
+                    seed=seed + stage_idx, kernel_size=kernel_size,
+                    gate_mode="uniform",
+                )
+            )
+            self.ncas.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channels * 2, hidden_ch, 3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv2d(hidden_ch, out_channels, 1),
+                )
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        state = x
+        for rens, nca in zip(self.rens_banks, self.ncas):
+            cml_out = rens(state)
+            correction = nca(torch.cat([state, cml_out], dim=1))
+            state = cml_out + correction
+            if self.use_sigmoid:
+                state = torch.clamp(state, 0, 1)
+        return state
+
+    def param_count(self) -> dict[str, int]:
+        trained = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen = sum(b.numel() for m in self.rens_banks for b in m.buffers())
+        return {"trained": trained, "frozen": frozen}
 
 
 class PureNCA(nn.Module):
@@ -107,7 +985,7 @@ class GatedBlendWM(nn.Module):
                  cml_steps: int = 15, nca_steps: int = 1,
                  r: float = 3.90, eps: float = 0.3, beta: float = 0.15,
                  seed: int = 42, out_channels: int | None = None,
-                 use_sigmoid: bool = True):
+                 use_sigmoid: bool = True, kernel_size: int = 3):
         super().__init__()
         if out_channels is None:
             out_channels = in_channels
@@ -118,7 +996,7 @@ class GatedBlendWM(nn.Module):
         self._recurrent_nca = (out_channels == in_channels)
 
         # CML operates on the first out_channels channels (the "state")
-        self.cml_2d = CML2D(out_channels, cml_steps, r, eps, beta, seed)
+        self.cml_2d = CML2D(out_channels, cml_steps, r, eps, beta, seed, kernel_size=kernel_size)
 
         self.nca_perceive = nn.Conv2d(in_channels, hidden_ch, 3, padding=1)
         nca_tail: list[nn.Module] = [
@@ -369,29 +1247,136 @@ class ResidualCorrectionWM(nn.Module):
                  cml_steps: int = 15,
                  r: float = 3.90, eps: float = 0.3, beta: float = 0.15,
                  seed: int = 42, out_channels: int | None = None,
-                 use_sigmoid: bool = True):
+                 use_sigmoid: bool = True, kernel_size: int = 3,
+                 cml_channels: int = 1, cml_gate: str = "none",
+                 cml_candidates: list | None = None,
+                 cml_warm_start_idx: int | None = None,
+                 cml_warm_start_logit: float = 2.0,
+                 cml_K: int = 8):
         super().__init__()
         if out_channels is None:
             out_channels = in_channels
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.use_sigmoid = use_sigmoid
+        self.cml_channels = cml_channels
+        # Total CML channels = out_channels * cml_channels (replicate each state channel)
+        total_cml_ch = out_channels * cml_channels
 
-        # CML operates on the first out_channels of x (the state)
-        self.cml_2d = CML2D(out_channels, cml_steps, r, eps, beta, seed)
+        # CML variant selection
+        if cml_gate == "static":
+            self.cml_2d = CML2DLearnedGateStatic(
+                total_cml_ch, cml_steps, r, eps, beta,
+                seed=seed, kernel_size=kernel_size)
+        elif cml_gate == "dynamic":
+            self.cml_2d = CML2DLearnedGateDynamic(
+                total_cml_ch, cml_steps, r, eps, beta,
+                seed=seed, kernel_size=kernel_size)
+        elif cml_gate == "discrete_global":
+            self.cml_2d = CML2DDiscreteSelect(
+                total_cml_ch, cml_steps, r,
+                seed=seed, kernel_size=kernel_size,
+                mode="global", eps_default=eps, beta_default=beta)
+        elif cml_gate == "discrete_percell":
+            self.cml_2d = CML2DDiscreteSelect(
+                total_cml_ch, cml_steps, r,
+                seed=seed, kernel_size=kernel_size,
+                mode="percell", eps_default=eps, beta_default=beta)
+        elif cml_gate == "multi_config":
+            self.cml_2d = CML2DMultiConfig(
+                total_cml_ch, cml_steps, r,
+                seed=seed, kernel_size=kernel_size,
+                mode="global",
+                candidates=cml_candidates,
+                warm_start_idx=cml_warm_start_idx,
+                warm_start_logit=cml_warm_start_logit)
+        elif cml_gate == "multi_config_percell":
+            self.cml_2d = CML2DMultiConfig(
+                total_cml_ch, cml_steps, r,
+                seed=seed, kernel_size=kernel_size,
+                mode="percell",
+                candidates=cml_candidates,
+                warm_start_idx=cml_warm_start_idx,
+                warm_start_logit=cml_warm_start_logit)
+        elif cml_gate == "multi_config_concat":
+            self.cml_2d = CML2DMultiConfig(
+                total_cml_ch, cml_steps, r,
+                seed=seed, kernel_size=kernel_size,
+                mode="concat",
+                candidates=cml_candidates)
+        elif cml_gate == "random_reservoir_preserved":
+            self.cml_2d = CML2DRandomReservoir(
+                total_cml_ch, K=cml_K, steps=cml_steps,
+                r=r, eps=eps, beta=beta,
+                seed=seed, kernel_size=kernel_size,
+                mode="preserved")
+        elif cml_gate == "random_reservoir_full":
+            self.cml_2d = CML2DRandomReservoir(
+                total_cml_ch, K=cml_K, steps=cml_steps,
+                r=r, eps=eps, beta=beta,
+                seed=seed, kernel_size=kernel_size,
+                mode="full")
+        elif cml_gate == "random_reservoir_full_cond":
+            self.cml_2d = CML2DRandomReservoir(
+                total_cml_ch, K=cml_K, steps=cml_steps,
+                r=r, eps=eps, beta=beta,
+                seed=seed, kernel_size=kernel_size,
+                mode="full", conditioned=True)
+        elif cml_gate == "random_reservoir_full_uniform":
+            self.cml_2d = CML2DRandomReservoir(
+                total_cml_ch, K=cml_K, steps=cml_steps,
+                r=r, eps=eps, beta=beta,
+                seed=seed, kernel_size=kernel_size,
+                mode="full", gate_mode="uniform")
+        elif cml_gate == "multi_r":
+            self.cml_2d = CML2DMultiR(
+                total_cml_ch, K=cml_K, steps=cml_steps,
+                eps=eps, beta=beta,
+                seed=seed, kernel_size=kernel_size,
+                gate_mode="learned")
+        elif cml_gate == "multi_r_uniform":
+            self.cml_2d = CML2DMultiR(
+                total_cml_ch, K=cml_K, steps=cml_steps,
+                eps=eps, beta=beta,
+                seed=seed, kernel_size=kernel_size,
+                gate_mode="uniform")
+        elif cml_gate == "hybrid_mr_esn":
+            K_half = cml_K // 2
+            self.cml_2d = CML2DHybridMrEsn(
+                total_cml_ch, K_mr=K_half, K_esn=cml_K - K_half,
+                steps=cml_steps, eps=eps, beta=beta,
+                seed=seed, kernel_size=kernel_size)
+        else:
+            self.cml_2d = CML2D(total_cml_ch, cml_steps, r, eps, beta, seed, kernel_size=kernel_size)
+
+        # NCA input channel count — concat mode passes K CML outputs instead of 1
+        if cml_gate == "multi_config_concat":
+            K = len(cml_candidates) if cml_candidates else 3
+            cml_out_channels = K * total_cml_ch
+        else:
+            cml_out_channels = total_cml_ch
 
         # NCA correction: [x | cml_out] -> out_channels
         self.nca = nn.Sequential(
-            nn.Conv2d(in_channels + out_channels, hidden_ch, 3, padding=1),
+            nn.Conv2d(in_channels + cml_out_channels, hidden_ch, 3, padding=1),
             nn.ReLU(),
             nn.Conv2d(hidden_ch, out_channels, 1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         state = x[:, : self.out_channels]
-        cml_out = self.cml_2d(state)
+        # Expand state: repeat each channel cml_channels times
+        if self.cml_channels > 1:
+            cml_input = state.repeat(1, self.cml_channels, 1, 1)
+            # Add small per-channel noise so each trajectory diverges
+            noise = torch.randn_like(cml_input) * 0.01
+            cml_input = (cml_input + noise).clamp(1e-4, 1 - 1e-4)
+        else:
+            cml_input = state
+        cml_out = self.cml_2d(cml_input)
         correction = self.nca(torch.cat([x, cml_out], dim=1))
-        out = cml_out + correction
+        # Residual from first out_channels of CML output (canonical trajectory)
+        out = cml_out[:, :self.out_channels] + correction
         if self.use_sigmoid:
             out = torch.clamp(out, 0, 1)
         return out
@@ -422,17 +1407,18 @@ class CML2DWithStats(nn.Module):
 
     def __init__(self, in_channels: int = 1, steps: int = 15,
                  r: float = 3.90, eps: float = 0.3, beta: float = 0.15,
-                 seed: int = 42):
+                 seed: int = 42, kernel_size: int = 3):
         super().__init__()
         self.in_channels = in_channels
         self.steps = steps
+        self.kernel_size = kernel_size
 
         self.register_buffer("r", torch.tensor(r))
         self.register_buffer("eps", torch.tensor(eps))
         self.register_buffer("beta", torch.tensor(beta))
 
         rng = torch.Generator().manual_seed(seed)
-        K_raw = torch.rand(in_channels, 1, 3, 3, generator=rng).abs()
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size, generator=rng).abs()
         K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
         self.register_buffer("K_local", K_norm)
 
@@ -440,10 +1426,11 @@ class CML2DWithStats(nn.Module):
         grid = drive
         first = drive
         r, eps, beta = self.r, self.eps, self.beta
+        pad = self.kernel_size // 2
         states: list[torch.Tensor] = []
         for _ in range(self.steps):
             mapped = r * grid * (1.0 - grid)
-            local = F.conv2d(mapped, self.K_local, padding=1,
+            local = F.conv2d(mapped, self.K_local, padding=pad,
                              groups=self.in_channels)
             physics = (1 - eps) * mapped + eps * local
             grid = (1 - beta) * physics + beta * drive
@@ -1020,17 +2007,18 @@ class CML2DWithTrajectory(nn.Module):
 
     def __init__(self, in_channels: int = 1, steps: int = 15,
                  r: float = 3.90, eps: float = 0.3, beta: float = 0.15,
-                 seed: int = 42):
+                 seed: int = 42, kernel_size: int = 3):
         super().__init__()
         self.in_channels = in_channels
         self.steps = steps
+        self.kernel_size = kernel_size
 
         self.register_buffer("r", torch.tensor(r))
         self.register_buffer("eps", torch.tensor(eps))
         self.register_buffer("beta", torch.tensor(beta))
 
         rng = torch.Generator().manual_seed(seed)
-        K_raw = torch.rand(in_channels, 1, 3, 3, generator=rng).abs()
+        K_raw = torch.rand(in_channels, 1, kernel_size, kernel_size, generator=rng).abs()
         K_norm = K_raw / K_raw.sum(dim=(-1, -2), keepdim=True)
         self.register_buffer("K_local", K_norm)
 
@@ -1038,10 +2026,11 @@ class CML2DWithTrajectory(nn.Module):
         grid = drive
         first = drive
         r, eps, beta = self.r, self.eps, self.beta
+        pad = self.kernel_size // 2
         states: list[torch.Tensor] = []
         for _ in range(self.steps):
             mapped = r * grid * (1.0 - grid)
-            local = F.conv2d(mapped, self.K_local, padding=1,
+            local = F.conv2d(mapped, self.K_local, padding=pad,
                              groups=self.in_channels)
             physics = (1 - eps) * mapped + eps * local
             grid = (1 - beta) * physics + beta * drive
@@ -1862,4 +2851,375 @@ class MatchingPrincipleGateWM(nn.Module):
     def param_count(self) -> dict[str, int]:
         trained = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen = sum(b.numel() for b in self.cml_2d.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+# ============================================================================
+# rescor_mamba: rescor_rens K=32 spatial + per-cell Mamba SSM temporal context
+# ============================================================================
+
+
+class ResCorMamba(nn.Module):
+    """rescor_rens K=32 spatial core + per-cell Mamba SSM temporal context.
+
+    Input:  x_seq (B, context_k, C, H, W) — most recent frame last.
+    Output: (B, C, H, W)                   — predicted next frame.
+
+    Spatial: rens K=32 applied to x_seq[:, -1]. No temporal rens passes
+    (the past is carried by Mamba).
+
+    Temporal: at each spatial position, run a K-step selective-SSM over
+    the context_k past frames. d_model=16, d_state=8, d_conv=4,
+    expand=2 (d_inner=32).
+
+    NCA correction: sees [x_now, cml_mean, mamba_feat] in mean-only mode.
+    Residual against cml_mean.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        hidden_ch: int = 16,
+        cml_steps: int = 15,
+        r_lo: float = 3.57,
+        r_hi: float = 3.99,
+        eps: float = 0.3,
+        beta: float = 0.15,
+        seed: int = 42,
+        out_channels: int | None = None,
+        use_sigmoid: bool = True,
+        kernel_size: int = 3,
+        cml_K: int = 32,
+        context_k: int = 4,
+        d_model: int = 16,
+        d_state: int = 8,
+        d_conv: int = 4,
+        expand: int = 2,
+        zero_init_out: bool = True,
+    ):
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        assert in_channels == out_channels, (
+            "ResCorMamba requires in_channels == out_channels"
+        )
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.use_sigmoid = use_sigmoid
+        self.context_k = context_k
+        self.d_model = d_model
+
+        # Spatial core: rens K=32 (uniform 1/K averaging)
+        self.rens = CML2DMultiR(
+            in_channels=in_channels, K=cml_K, steps=cml_steps,
+            r_lo=r_lo, r_hi=r_hi, eps=eps, beta=beta,
+            seed=seed, kernel_size=kernel_size, gate_mode="uniform",
+        )
+
+        # Temporal: per-cell linear project to d_model, then Mamba block.
+        self.in_proj = nn.Linear(in_channels, d_model, bias=True)
+        self.mamba = MinimalMambaBlock(
+            d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand,
+            zero_init_out=zero_init_out,
+        )
+
+        # NCA correction: [x_now (C), cml_mean (C), mamba_feat (d_model)]
+        nca_in = in_channels + in_channels + d_model
+        self.nca = nn.Sequential(
+            nn.Conv2d(nca_in, hidden_ch, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_ch, out_channels, 1),
+        )
+
+    def _mamba_feat(self, x_seq: torch.Tensor) -> torch.Tensor:
+        """x_seq: (B, K, C, H, W) -> (B, d_model, H, W)."""
+        B, K, C, H, W = x_seq.shape
+        # (B, K, C, H, W) -> (B, H, W, K, C) -> (B*H*W, K, C)
+        seq = x_seq.permute(0, 3, 4, 1, 2).reshape(B * H * W, K, C)
+        seq = self.in_proj(seq)                      # (B*H*W, K, d_model)
+        h_seq = self.mamba(seq)                      # (B*H*W, K, d_model)
+        h_last = h_seq[:, -1, :]                     # (B*H*W, d_model)
+        feat = h_last.reshape(B, H, W, self.d_model).permute(0, 3, 1, 2)
+        return feat.contiguous()
+
+    def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+        # Accept (B, C, H, W) as a back-compat convenience: treat as K=1.
+        if x_seq.dim() == 4:
+            x_seq = x_seq.unsqueeze(1)
+        assert x_seq.dim() == 5, f"Expected rank-5 (B,K,C,H,W); got {x_seq.shape}"
+        x_now = x_seq[:, -1]                         # (B, C, H, W)
+
+        with torch.no_grad():
+            stack = self.rens._run_batched(x_now)    # (B, K_rens, C, H, W)
+            cml_mean = stack.mean(dim=1)             # (B, C, H, W)
+
+        temporal_feat = self._mamba_feat(x_seq)      # (B, d_model, H, W)
+
+        nca_in = torch.cat([x_now, cml_mean, temporal_feat], dim=1)
+        correction = self.nca(nca_in)
+        out = cml_mean + correction
+        if self.use_sigmoid:
+            out = torch.clamp(out, 0, 1)
+        return out
+
+    def param_count(self) -> dict[str, int]:
+        trained = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen = sum(b.numel() for b in self.rens.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+class ResCorMambaStat(nn.Module):
+    """ResCorMamba variant with stat-bank NCA.
+
+    NCA input: [x_now, cml_mean, cml_min, cml_max, mamba_feat]
+    (min/max over the K=32 reservoir bank, matching ResCorRensStatBank
+    include_var=False layout).
+
+    Residual: cml_mean (unchanged).
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        hidden_ch: int = 16,
+        cml_steps: int = 15,
+        r_lo: float = 3.57,
+        r_hi: float = 3.99,
+        eps: float = 0.3,
+        beta: float = 0.15,
+        seed: int = 42,
+        out_channels: int | None = None,
+        use_sigmoid: bool = True,
+        kernel_size: int = 3,
+        cml_K: int = 32,
+        context_k: int = 4,
+        d_model: int = 16,
+        d_state: int = 8,
+        d_conv: int = 4,
+        expand: int = 2,
+        zero_init_out: bool = True,
+    ):
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        assert in_channels == out_channels, (
+            "ResCorMambaStat requires in_channels == out_channels"
+        )
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.use_sigmoid = use_sigmoid
+        self.context_k = context_k
+        self.d_model = d_model
+
+        self.rens = CML2DMultiR(
+            in_channels=in_channels, K=cml_K, steps=cml_steps,
+            r_lo=r_lo, r_hi=r_hi, eps=eps, beta=beta,
+            seed=seed, kernel_size=kernel_size, gate_mode="uniform",
+        )
+
+        self.in_proj = nn.Linear(in_channels, d_model, bias=True)
+        self.mamba = MinimalMambaBlock(
+            d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand,
+            zero_init_out=zero_init_out,
+        )
+
+        # NCA input: [x_now, cml_mean, cml_min, cml_max, mamba_feat]
+        # 4·C + d_model channels.
+        nca_in = in_channels * 4 + d_model
+        self.nca = nn.Sequential(
+            nn.Conv2d(nca_in, hidden_ch, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_ch, out_channels, 1),
+        )
+
+    def _mamba_feat(self, x_seq: torch.Tensor) -> torch.Tensor:
+        B, K, C, H, W = x_seq.shape
+        seq = x_seq.permute(0, 3, 4, 1, 2).reshape(B * H * W, K, C)
+        seq = self.in_proj(seq)
+        h_seq = self.mamba(seq)
+        h_last = h_seq[:, -1, :]
+        feat = h_last.reshape(B, H, W, self.d_model).permute(0, 3, 1, 2)
+        return feat.contiguous()
+
+    def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+        if x_seq.dim() == 4:
+            x_seq = x_seq.unsqueeze(1)
+        assert x_seq.dim() == 5, f"Expected rank-5 (B,K,C,H,W); got {x_seq.shape}"
+        x_now = x_seq[:, -1]
+
+        with torch.no_grad():
+            stack = self.rens._run_batched(x_now)   # (B, K_rens, C, H, W)
+            cml_mean = stack.mean(dim=1)
+            cml_min = stack.min(dim=1).values
+            cml_max = stack.max(dim=1).values
+
+        temporal_feat = self._mamba_feat(x_seq)
+        nca_in = torch.cat(
+            [x_now, cml_mean, cml_min, cml_max, temporal_feat], dim=1
+        )
+        correction = self.nca(nca_in)
+        out = cml_mean + correction
+        if self.use_sigmoid:
+            out = torch.clamp(out, 0, 1)
+        return out
+
+    def param_count(self) -> dict[str, int]:
+        trained = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen = sum(b.numel() for b in self.rens.buffers())
+        return {"trained": trained, "frozen": frozen}
+
+
+class ResCorMambaGated(nn.Module):
+    """Drift-gated ResCorMamba: auto-attenuate Mamba contribution at high drift.
+
+    Same backbone as :class:`ResCorMamba` (rens K=32 spatial core +
+    per-cell Mamba SSM over context_k=4 past frames + NCA correction).
+    The single architectural change is a per-cell sigmoid gate on the
+    NCA correction:
+
+        drift = sqrt( mean_C( (x_now - cml_mean)**2 ) )       # (B, 1, H, W)
+        gate  = sigmoid( gate_scale * (-drift + gate_bias) )  # (B, 1, H, W)
+        correction = NCA([x_now, cml_mean, mamba_feat]) * gate
+        out = cml_mean + correction
+
+    When predictions drift far from the rens "neutral" prediction
+    (cml_mean), the gate closes (gate -> 0) and the model falls back
+    to ``cml_mean`` (pure rens K=32 behavior — mediocre but never
+    catastrophic). When near-manifold (drift -> 0), gate -> sigmoid(
+    gate_bias) and the full Mamba contribution is preserved.
+
+    Two new trainable scalars: ``gate_scale`` (steepness) and
+    ``gate_bias`` (where the gate turns off). Initialized so the gate
+    is non-degenerate at the start of training.
+
+    Important: ``cml_mean`` is detached when computing ``drift`` — the
+    rens reservoir has no trainable parameters but we still don't want
+    gate-side gradients to flow through that subgraph.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        hidden_ch: int = 16,
+        cml_steps: int = 15,
+        r_lo: float = 3.57,
+        r_hi: float = 3.99,
+        eps: float = 0.3,
+        beta: float = 0.15,
+        seed: int = 42,
+        out_channels: int | None = None,
+        use_sigmoid: bool = True,
+        kernel_size: int = 3,
+        cml_K: int = 32,
+        context_k: int = 4,
+        d_model: int = 16,
+        d_state: int = 8,
+        d_conv: int = 4,
+        expand: int = 2,
+        zero_init_out: bool = True,
+        gate_scale_init: float = 1.0,
+        gate_bias_init: float = 0.5,
+    ):
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        assert in_channels == out_channels, (
+            "ResCorMambaGated requires in_channels == out_channels"
+        )
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.use_sigmoid = use_sigmoid
+        self.context_k = context_k
+        self.d_model = d_model
+
+        self.rens = CML2DMultiR(
+            in_channels=in_channels, K=cml_K, steps=cml_steps,
+            r_lo=r_lo, r_hi=r_hi, eps=eps, beta=beta,
+            seed=seed, kernel_size=kernel_size, gate_mode="uniform",
+        )
+
+        self.in_proj = nn.Linear(in_channels, d_model, bias=True)
+        self.mamba = MinimalMambaBlock(
+            d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand,
+            zero_init_out=zero_init_out,
+        )
+
+        nca_in = in_channels + in_channels + d_model
+        self.nca = nn.Sequential(
+            nn.Conv2d(nca_in, hidden_ch, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_ch, out_channels, 1),
+        )
+
+        # Two trainable scalars governing the drift-gated attenuation.
+        # gate_scale starts small (so the gate is roughly flat in drift
+        # space at init); gate_bias starts at 0.5 so initial gate value
+        # at drift=0 is sigmoid(gate_scale*gate_bias) = sigmoid(0.5) ~ 0.62
+        # — non-degenerate, allowing both training signal directions.
+        self.gate_scale = nn.Parameter(torch.tensor(float(gate_scale_init)))
+        self.gate_bias = nn.Parameter(torch.tensor(float(gate_bias_init)))
+
+    def _mamba_feat(self, x_seq: torch.Tensor) -> torch.Tensor:
+        """x_seq: (B, K, C, H, W) -> (B, d_model, H, W)."""
+        B, K, C, H, W = x_seq.shape
+        seq = x_seq.permute(0, 3, 4, 1, 2).reshape(B * H * W, K, C)
+        seq = self.in_proj(seq)
+        h_seq = self.mamba(seq)
+        h_last = h_seq[:, -1, :]
+        feat = h_last.reshape(B, H, W, self.d_model).permute(0, 3, 1, 2)
+        return feat.contiguous()
+
+    def compute_gate(self, x_now: torch.Tensor,
+                     cml_mean: torch.Tensor | None = None) -> torch.Tensor:
+        """Drift-gated sigmoid. Returns (B, 1, H, W) gate tensor.
+
+        If ``x_now`` is rank-5 ``(B, K, C, H, W)`` (a context buffer), the
+        most-recent frame is used (so callers in the multistep loop can
+        pass the full state directly). If ``cml_mean`` is None, it is
+        computed from the rens reservoir on the fly — useful for the
+        MSDC drift-conditioned multistep loss path which doesn't have
+        cml_mean cached.
+
+        Detaches cml_mean so gate gradients don't propagate through the
+        rens reservoir's subgraph (rens has no trainable params, but
+        keeping the graph clean is cheap and removes a class of
+        confusion).
+        """
+        if x_now.dim() == 5:
+            x_now = x_now[:, -1]
+        if cml_mean is None:
+            with torch.no_grad():
+                stack = self.rens._run_batched(x_now)
+                cml_mean = stack.mean(dim=1)
+        diff = x_now - cml_mean.detach()
+        drift = (diff ** 2).mean(dim=1, keepdim=True).clamp_min(0.0).sqrt()
+        gate = torch.sigmoid(self.gate_scale * (-drift + self.gate_bias))
+        return gate
+
+    def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+        if x_seq.dim() == 4:
+            x_seq = x_seq.unsqueeze(1)
+        assert x_seq.dim() == 5, f"Expected rank-5 (B,K,C,H,W); got {x_seq.shape}"
+        x_now = x_seq[:, -1]                         # (B, C, H, W)
+
+        with torch.no_grad():
+            stack = self.rens._run_batched(x_now)    # (B, K_rens, C, H, W)
+            cml_mean = stack.mean(dim=1)             # (B, C, H, W)
+
+        temporal_feat = self._mamba_feat(x_seq)      # (B, d_model, H, W)
+
+        nca_in = torch.cat([x_now, cml_mean, temporal_feat], dim=1)
+        correction = self.nca(nca_in)                # (B, C, H, W)
+
+        gate = self.compute_gate(x_now, cml_mean)    # (B, 1, H, W)
+        correction = correction * gate
+
+        out = cml_mean + correction
+        if self.use_sigmoid:
+            out = torch.clamp(out, 0, 1)
+        return out
+
+    def param_count(self) -> dict[str, int]:
+        trained = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen = sum(b.numel() for b in self.rens.buffers())
         return {"trained": trained, "frozen": frozen}

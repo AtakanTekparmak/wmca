@@ -20,6 +20,16 @@ data/
 # Experiment tracking
 wandb/
 
+# Generated experiment data (large .npy files)
+experiments/*_data/*.npy
+experiments/crafter_data/*.npy
+experiments/results/*.log
+experiments/results/*.npy
+*.log
+
+# Large generated embeddings
+experiments/crafter_data/delta_*
+
 # Experiment plots (keep directory, ignore generated images)
 experiments/plots/*.png
 experiments/plots/*.pdf
@@ -32,3 +42,8 @@ experiments/plots/*.pdf
 .idea/
 .vscode/
 *.swp
+
+# Experiment results and checkpoints (generated)
+experiments/results/
+experiments/vqvae_checkpoints/
+experiments/*_checkpoints/
